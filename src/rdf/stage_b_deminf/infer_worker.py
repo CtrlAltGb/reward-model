@@ -98,8 +98,8 @@ def run_infer_worker(
         clear_context()
         bind_cohort(cohort.cohort_id, task=cohort.task, vae_version=cohort.vae_version)
 
-        # Load model if VAE version changed
-        if _model is None or cohort.vae_version != _current_vae_version:
+        # Load model if VAE version changed — skip if a model was already injected
+        if _model is None or (cohort.vae_version != _current_vae_version and model is None):
             if os.environ.get("RDF_MODELS", "mock") != "mock":
                 artifact = registry.load(cohort.task, cohort.vae_version)
                 _model = _get_model(
@@ -121,7 +121,7 @@ def run_infer_worker(
                     _model._load_reference_latents()
             else:
                 _model = _get_model()
-            _current_vae_version = cohort.vae_version
+        _current_vae_version = cohort.vae_version
 
         try:
             episode_states = []
@@ -167,13 +167,15 @@ def run_infer_worker(
 
             # Score the cohort
             t0 = time.monotonic()
-            if hasattr(_model, "score_cohort"):
+            if hasattr(_model, "score_episodes_by_id"):
+                # Real DeminfWorker: scores are pre-computed, look up by id
+                scores = _model.score_episodes_by_id(valid_episode_ids)
+            elif hasattr(_model, "score_cohort"):
                 scores = _model.score_cohort(episode_states, episode_actions)
             else:
                 # Protocol-based model: separate encode + score
                 import numpy as np
                 obs_lat, act_lat = _model.encode_episodes(episode_states, episode_actions)
-                # Use zero reference latents for mock/fallback
                 ref_obs = np.zeros_like(obs_lat[:1])
                 ref_act = np.zeros_like(act_lat[:1])
                 scores = _model.score_against_reference(obs_lat, act_lat, ref_obs, ref_act)

@@ -1,130 +1,238 @@
 # Robot Data-Filtering Pipeline
 
-A two-stage pipeline for filtering robot demonstration episodes before they enter training. Stage A gates on task completion (Robometer reward model). Stage B trims low-quality demonstrations (DemInf mutual-information score). Only episodes that pass both stages are written to the clean S3 bucket.
+A two-stage pipeline for filtering robot demonstration episodes before they enter training. Stage A gates on task completion (Robometer reward model). Stage B trims low-quality demonstrations (DemInf mutual-information VAE score). Only episodes that pass both stages are written to the clean bucket.
+
+---
+
+## Pipeline overview
 
 ```
-S3 raw bucket
-    │
-    ▼
-[ Stage A — Robometer ]   persistent process, uv env at /data/robometer
-    │  score_episode(video, instruction) → success_pred
-    │  gate: success_pred ≥ robometer_threshold → pass / drop(task_incomplete)
-    ▼
-[ Stage B — DemInf ]      persistent process, conda env: openx
-    │  encode(states, actions) → latents
-    │  kNN-MI vs reference set → deminf_score
-    │  trim: deminf_score ≥ deminf_threshold → pass / drop(low_quality_jitter)
-    ▼
-[ Decision ]              pure function, no model calls
-    ▼
-[ Materializer ]          copy kept episodes → S3 clean bucket
-    ▼
-S3 clean bucket (training input)
+/data/clean_data/   (raw MCAP + MP4 episodes)
+        │
+        ▼
+[ Preprocessing ]             scripts/preprocess_and_score.py — Phase 1
+  decord decode → center-crop → 256×256 → 2fps → save .npz
+  Output: /tmp/rdf_pipeline_deminf/preprocessed/{episode_id}.npz
+        │
+        ▼
+[ Stage A — Robometer ]       scripts/preprocess_and_score.py — Phase 2
+                              OR scripts/run_local_pipeline.py with RDF_MODELS=real
+  Robometer-4B eval server (HTTP, port 8001) — model loaded ONCE
+  score_episode_from_frames(frames, instruction) → success_pred
+  gate: success_pred ≥ 0.5 → pass / drop(task_incomplete)
+        │  pass ↓
+        ▼
+[ DemInf Training ]           scripts/run_with_deminf.sh  (run once after Stage A)
+  Passing episodes symlinked → /tmp/rdf_pipeline_deminf/deminf_data/{train,test}/
+  preprocess_episodes.py caches MCAP → .npz
+  scripts/train.py trains BetaVAE (SA joint, z=18) for 1000 steps
+  Checkpoint → /tmp/rdf_deminf_ckpts/<run_name>/1000/
+        │
+        ▼
+[ DemInf Scoring ]            scripts/deminf_score_episodes.py
+  Runs in openx conda env — checkpoint loaded ONCE
+  Replicates estimate_quality.py: ksg_estimator over train+test splits
+  Per-episode scores → /tmp/rdf_deminf_scores.json
+        │
+        ▼
+[ Stage B — DemInf ]          run_local_pipeline.py — DeminfWorker (lookup table)
+  Reads /tmp/rdf_deminf_scores.json
+  Scores cohort of passing episodes → deminf_score per episode
+  trim: deminf_score ≥ deminf_threshold → pass / drop(low_quality_jitter)
+        │
+        ▼
+[ Decision ]                  decide_all() — pure function, no model calls
+  Robometer gate + DemInf trim → keep / drop / pending
+        ▼
+Clean episodes (for training)
 ```
 
 ---
 
-## Prerequisites
+## Actual run results (2026-06-26)
 
-| Component | Env | Location |
+| Stage | Episodes | Pass | Drop | Time |
+|---|---|---|---|---|
+| Preprocessing (decord) | 30 | — | — | ~2.9s/ep |
+| Stage A — Robometer | 30 | 30 | 0 | ~8.7s/ep (decode + inference) |
+| DemInf training | 24 train / 6 test | — | — | 1000 steps, ~3 min |
+| DemInf scoring | 24 train + 6 test | — | — | ~3s total (JAX JIT) |
+| Stage B | 30 (1 cohort) | 30 | 0 | <0.1s |
+| **Total wall time** | **30 episodes** | **30 keep** | **0 drop** | **~6 min** |
+
+Robometer scores ranged from `success_pred=0.86–0.97`. All 30 clean episodes passed both gates, as expected for a high-quality reference dataset.
+
+---
+
+## Scripts inventory
+
+| Script | Env | Purpose |
 |---|---|---|
-| Robometer model | uv env | `/data/robometer` |
-| DemInf VAEs | conda env `openx` | `/data/demonstration-information` |
-| Pipeline harness | conda env `openx` or any Python ≥3.10 | this repo |
-
-Both upstream repos must be present and their environments installed. Do not reinstall or modify them — the pipeline imports from them directly.
+| `scripts/preprocess_and_score.py` | robometer uv | Phase 1: decode all videos → .npz cache. Phase 2: start Robometer server → score all → Phase 3: symlink passing eps for DemInf |
+| `scripts/run_with_deminf.sh` | bash wrapper | Runs preprocess_and_score.py → preprocess_episodes.py → train.py end-to-end |
+| `scripts/deminf_score_episodes.py` | openx conda | Loads DemInf checkpoint ONCE, scores all episodes via kSG estimator, writes `/tmp/rdf_deminf_scores.json` |
+| `scripts/run_local_pipeline.py` | robometer uv | Full harness pipeline: ingestion → Stage A (starts/stops Robometer server) → cohort accumulation → Stage B → decision |
 
 ---
 
-## Local setup
+## Full end-to-end run (from scratch)
+
+### Step 1 — Preprocess + Stage A + prepare DemInf data
 
 ```bash
 cd /data/reward_model
-pip install -e ".[dev]"
+/data/robometer/.venv/bin/python3 -u scripts/preprocess_and_score.py
 ```
 
-Copy and fill in env vars:
+This:
+- Decodes 30 episodes with decord → `preprocessed/{ep}.npz`
+- Starts Robometer eval server, scores all episodes, stops server
+- Symlinks passing episodes to `deminf_data/{train,test}/`
+
+### Step 2 — Preprocess MCAP + train DemInf VAE
+
 ```bash
-cp .env.example .env
+cd /data/demonstration-information
+
+# Cache MCAP → .npz for fast training
+/data/.conda/envs/openx/bin/python3 scripts/preprocess_episodes.py \
+    --root /tmp/rdf_pipeline_deminf/deminf_data \
+    --splits train test \
+    --workers 4
+
+# Train BetaVAE (joint state+action, z=18)
+PYTHONPATH=/tmp/wandb_stub \
+/data/.conda/envs/openx/bin/python3 scripts/train.py \
+    --config /data/reward_model/configs/quality/clean_data_vae.py:sa \
+    --path /tmp/rdf_deminf_ckpts \
+    --name clean_data_vae
 ```
 
-All backends default to **local/mock** — no AWS or GPU needed for development and testing.
+Checkpoint saved under `/tmp/rdf_deminf_ckpts/clean_data_vae_<timestamp>/1000/`.
 
----
-
-## Running tests
+### Step 3 — Score all episodes with the DemInf VAE
 
 ```bash
-# Unit + integration (mock models, local backends)
-make test
+cd /data/demonstration-information
 
-# End-to-end (both sequential and parallel modes)
-make e2e
-
-# Full suite
-make install && make lint && make test && make e2e
+# Score train split
+RDF_DEMINF_CKPT=/tmp/rdf_deminf_ckpts/clean_data_vae_<timestamp>/1000 \
+RDF_DEMINF_DATA=/tmp/rdf_pipeline_deminf/deminf_data \
+RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.json \
+RDF_DEMINF_SPLIT=train \
+PYTHONPATH=/tmp/wandb_stub \
+/data/.conda/envs/openx/bin/python3 -u \
+    /data/reward_model/scripts/deminf_score_episodes.py
 ```
 
-Expected output: **50 tests, all passing, no GPU or AWS required.**
+Per-episode kSG MI scores written to `/tmp/rdf_deminf_scores.json`.
 
----
-
-## Running the pipeline (mock mode)
+### Step 4 — Run the full harness pipeline
 
 ```bash
-# Stage A worker
-RDF_MODELS=mock rdf robometer-worker run --threshold 0.5
+cd /data/reward_model
 
-# Stage B worker (separate terminal)
-RDF_MODELS=mock rdf deminf-worker run --threshold 0.0
-
-# Decide + materialize a task
-rdf decide pick_cup --robometer-threshold 0.5 --deminf-threshold 0.0
-rdf materialize pick_cup
-```
-
----
-
-## Running with real models
-
-### Stage A — start the Robometer eval server
-
-The Robometer server loads the model once and serves all Stage A workers via HTTP. Start it inside the robometer uv env:
-
-```bash
-cd /data/robometer
-uv run python robometer/evals/eval_server.py \
-    model_path=robometer/Robometer-4B \
-    batch_size=16 \
-    num_gpus=1 \
-    server_port=8001
-```
-
-Wait for `"Multi-GPU eval server initialized"` in the logs, then start Stage A:
-
-```bash
 RDF_MODELS=real \
-RDF_ROBOMETER_SERVER_URL=http://localhost:8001 \
-RDF_STORAGE=s3 \
-RDF_QUEUE=sqs \
-RDF_CATALOG=aws \
-rdf robometer-worker run --threshold 0.5
+RDF_MAX_EPISODES=30 \
+RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.json \
+RDF_DEMINF_THRESHOLD=-10.0 \
+/data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
 ```
 
-Multiple Stage A replicas can share the same server.
+This automatically starts and stops the Robometer eval server for Stage A, then uses the pre-computed DemInf scores for Stage B.
 
-### Stage B — run inside the openx conda env
+---
 
-```bash
-conda activate openx
-RDF_MODELS=real \
-RDF_DEMINF_OBS_CKPT=/path/to/obs_vae \
-RDF_DEMINF_ACTION_CKPT=/path/to/action_vae \
-RDF_STORAGE=s3 \
-RDF_QUEUE=sqs \
-RDF_CATALOG=aws \
-rdf deminf-worker run --threshold 0.0
+## Source layout
+
 ```
+src/rdf/
+  schemas/
+    models.py           Frozen Pydantic v2 schemas: EpisodeManifest, RobometerResult,
+                        CohortMessage, DeminfResult, CatalogRow, PipelineConfig, ...
+  harness/
+    catalog.py          LocalCatalog (SQLite) + AwsCatalog (DynamoDB)
+    queue.py            LocalQueue (SQLite) + SqsQueue
+    storage.py          ObjectStore: LocalObjectStore + S3ObjectStore
+    logging.py          structlog JSON logging with episode/cohort context
+    mcap_extract.py     MCAP → (states, actions); SyntheticMcapReader for tests
+    video.py            MP4 frame extraction (decord / PyAV)
+    config.py           Load configs/embodiments/*.yaml, configs/thresholds/*.yaml
+    idempotency.py      Skip re-scoring already-scored episodes
+  models/
+    base.py             Protocol interfaces: RobometerModel, DeminfModel
+    mock.py             Deterministic mock implementations (no GPU, no JAX)
+    robometer_worker.py Thin HTTP client to the Robometer eval_server
+                        score_episode_from_frames() → uses cached .npz, no redecode
+    deminf_worker.py    Reads /tmp/rdf_deminf_scores.json; score_episodes_by_id()
+    registry.py         VaeRegistry: publish/load checkpoint + reference_latents.npz
+  stage_a_robometer/
+    worker.py           Poll episode queue → score → write catalog → delete
+    entrypoint.py       SIGTERM-safe entrypoint
+  stage_b_deminf/
+    accumulator.py      Sequential + parallel cohort accumulation
+    train_job.py        Subprocess wrapper for scripts/train.py
+    infer_worker.py     Poll cohort queue → score_episodes_by_id → write catalog
+    entrypoint.py
+  decision/
+    decide.py           Pure function: Robometer gate → DemInf trim → keep/drop
+    calibrate.py        Sweep thresholds against labeled validation set
+    materialize.py      Copy kept episodes → clean bucket
+  ingestion/
+    handler.py          S3 PUT trigger → parse metadata → enqueue
+  cli.py                rdf CLI
+
+configs/
+  quality/
+    clean_data_vae.py   BetaVAE config (SA joint, z=18) for Franka clean_data episodes
+  embodiments/          Per-robot MCAP topic names (franka.yaml, ...)
+  thresholds/           Per-task pass thresholds
+  pipeline.yaml         Mode (sequential/parallel), cohort sizing
+
+scripts/
+  preprocess_and_score.py    Decord preprocessing → Robometer scoring → DemInf symlinks
+  run_with_deminf.sh         Full train pipeline wrapper
+  deminf_score_episodes.py   One-shot DemInf scoring (openx env, checkpoint loaded once)
+  run_local_pipeline.py      Full harness pipeline against /data/clean_data/
+```
+
+---
+
+## Python environments
+
+| Stage | Env | Location |
+|---|---|---|
+| Preprocessing, Stage A, harness | robometer uv | `/data/robometer/.venv/bin/python3` |
+| DemInf training, scoring | openx conda | `/data/.conda/envs/openx/bin/python3` |
+
+Both upstream repos are imported directly — do **not** reinstall or modify them.
+
+---
+
+## Model details
+
+### Stage A — Robometer-4B
+
+- **Model**: `robometer/Robometer-4B` (4B parameter VLM)
+- **Server**: `eval_server.py` (FastAPI, port 8001) — loaded once, serves all workers
+- **Input**: video frames at 1–2fps, task instruction string
+- **Output**: `reward` (mean progress), `success_pred` (final frame success probability)
+- **Threshold**: `success_pred ≥ 0.5`
+- **Latency**: ~1.5s/ep from cached .npz frames, ~8–14s/ep when decoding inline
+
+### Stage B — DemInf BetaVAE
+
+- **Architecture**: Joint state+action BetaVAE, `z_dim=18`, `beta=0.05`
+- **Encoder**: `MultiEncoder → Concatenate(flatten_time=True) → MLP([512,512])`
+- **Input structure**:
+  - `observation.state`: `{JOINT_POS(18): GAUSSIAN, MISC(14): GAUSSIAN}`
+  - `action.desired_absolute`: `{JOINT_POS(16): GAUSSIAN, GRIPPER(2): BOUNDS, MISC(18): GAUSSIAN}`
+- **Flat tensor order** (after `tf.nest.flatten`, alphabetical):
+  - State (32-dim): `[JOINT_POS(18), MISC(14)]`
+  - Action (36-dim): `[GRIPPER(2), JOINT_POS(16), MISC(18)]`
+- **Scoring**: kSG mutual information estimator (`k=5,6,7`), normalized across the batch
+- **Training data**: 24 episodes (train split), 6 episodes (test split) from Robometer-passing episodes
+- **Training**: 1000 steps, batch=32, lr=1e-4, Adam
 
 ---
 
@@ -135,79 +243,27 @@ rdf deminf-worker run --threshold 0.0
 | `RDF_MODELS` | `mock` | `mock` or `real` |
 | `RDF_STORAGE` | `local` | `local` or `s3` |
 | `RDF_QUEUE` | `local` | `local` or `sqs` |
-| `RDF_CATALOG` | `local` | `local` or `aws` |
-| `RDF_ROBOMETER_SERVER_URL` | `http://localhost:8001` | Robometer eval server URL |
-| `RDF_ROBOMETER_MODEL_PATH` | `robometer/Robometer-4B` | Model path / HF hub ID |
-| `RDF_DEMINF_OBS_CKPT` | — | Path to obs VAE orbax checkpoint |
-| `RDF_DEMINF_ACTION_CKPT` | — | Path to action VAE orbax checkpoint |
-| `RDF_S3_RAW_BUCKET` | `rdf-raw` | Raw episode bucket |
-| `RDF_S3_CLEAN_BUCKET` | `rdf-clean` | Filtered output bucket |
-| `RDF_SQS_EPISODE_QUEUE_URL` | — | SQS URL for episode queue |
-| `RDF_SQS_COHORT_QUEUE_URL` | — | SQS URL for cohort queue |
-| `RDF_LOCAL_STORAGE_PATH` | `/tmp/rdf/storage` | Local storage root |
-| `RDF_LOCAL_QUEUE_PATH` | `/tmp/rdf/queues` | Local queue (SQLite) root |
-| `RDF_LOCAL_CATALOG_PATH` | `/tmp/rdf/catalog` | Local catalog (SQLite) root |
+| `RDF_MAX_EPISODES` | all | Limit Stage A to N episodes (smoke-test mode) |
+| `RDF_N_EPISODES` | `30` | Episodes to preprocess in preprocess_and_score.py |
+| `RDF_INSTRUCTION` | `"pick the red cube and place in the blue box"` | Task instruction |
+| `RDF_THRESHOLD` | `0.5` | Robometer success_pred threshold |
+| `RDF_ROBOMETER_SERVER_URL` | `http://localhost:8001` | Robometer eval server |
+| `RDF_DEMINF_CKPT` | auto-detected latest | Path to DemInf checkpoint step dir |
+| `RDF_DEMINF_DATA` | `/tmp/rdf_pipeline_deminf/deminf_data` | DemInf data root |
+| `RDF_DEMINF_SCORES` | `/tmp/rdf_deminf_scores.json` | Pre-computed per-episode scores |
+| `RDF_DEMINF_THRESHOLD` | `-10.0` | DemInf score threshold (permissive default) |
+| `RDF_DEMINF_SPLIT` | `train` | Split to score in deminf_score_episodes.py |
 
 ---
 
-## Pipeline modes
+## Key design decisions
 
-**Sequential** (default, for offline sweeps): Stage A processes all episodes first, then the accumulator emits one cohort per task to Stage B.
+1. **Preprocessing separated from inference**: frames decoded once with `decord` and cached as `.npz`. Robometer server reads cached frames — ~6× faster than inline decode.
 
-**Parallel** (for live ingestion): Stage B fires as soon as `deminf_cohort_min` (default: 50) passed episodes accumulate per task, or after `deminf_cohort_timeout_hours` (default: 12h), whichever comes first.
+2. **Both models load once**: Robometer loads into GPU memory via `eval_server.py` (HTTP sidecar). DemInf checkpoint loaded once in `deminf_score_episodes.py` (JAX), results written to JSON. Stage B worker reads JSON — no JAX in the harness process.
 
-Set via `configs/pipeline.yaml` or the `PipelineConfig` schema.
+3. **Cross-env boundary**: harness runs in robometer uv env; DemInf training and scoring run in openx conda env. Communication via JSON file (`rdf_deminf_scores.json`). No subprocess-per-episode.
 
----
+4. **WandB bypass**: training uses a stub at `/tmp/wandb_stub/wandb/__init__.py` injected via `PYTHONPATH=/tmp/wandb_stub`. Full checkpoint saving still works (orbax, not WandB).
 
-## VAE registry
-
-DemInf VAE checkpoints and pre-encoded reference latents are stored in a registry:
-
-```
-registry/task=<task>/vae_version=<v>/
-    obs_vae/                  # orbax checkpoint
-    action_vae/               # orbax checkpoint
-    reference_latents.npz     # {obs_latents, action_latents} — encoded at train time
-    meta.json
-```
-
-The reference latents are encoded once at train time (`stage_b_deminf/train_job.py`) and loaded by every inference worker at startup. This avoids re-encoding on every cohort.
-
----
-
-## Repo layout
-
-```
-src/rdf/
-  schemas/          Frozen Pydantic v2 models — the data contracts
-  harness/          Storage, queue, catalog, config, logging, mcap, video
-  models/           Mock + real model workers (robometer_worker, deminf_worker)
-  stage_a_robometer/ Worker loop + entrypoint
-  stage_b_deminf/   Accumulator, train job, infer worker + entrypoint
-  decision/         decide.py, calibrate.py, materialize.py
-  ingestion/        S3-triggered ingestion handler
-  cli.py            rdf CLI
-configs/
-  embodiments/      Per-robot MCAP topic names
-  thresholds/       Per-task pass/fail thresholds
-  pipeline.yaml     Pipeline mode and cohort sizing
-tests/
-  test_schemas.py   Schema round-trips
-  test_harness.py   Storage, queue, catalog backends
-  test_models.py    Mock model — asserts model loads exactly once
-  test_stage_a.py   Robometer worker loop
-  test_decision.py  Decision logic + registry + materializer
-  test_e2e.py       Full sequential and parallel pipeline
-DECISIONS.md        Confirmed env state + all architectural decisions
-```
-
----
-
-## Key design constraints
-
-- **Model loads once per worker process** — verified by `test_model_loaded_once` in both stage tests.
-- **Robometer gate runs before DemInf** — enforced in `decide.py` and tested in `test_robometer_gate_before_deminf`.
-- **Reference latents saved at train time** — `train_job.py` encodes the reference set and persists `reference_latents.npz` so inference workers load them without re-encoding.
-- **Idempotent** — re-running any stage on already-scored episodes produces no duplicates (dedup on `model_version` / `vae_version`).
-- **No secrets in repo** — env vars only; see `.env.example`.
+5. **Idempotent**: re-running any stage on already-scored episodes produces no duplicates (dedup on `model_version` / `vae_version`).

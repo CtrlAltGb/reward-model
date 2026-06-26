@@ -75,18 +75,15 @@ def preprocess_video(
     if not raw_frames:
         return np.zeros((1, target_size, target_size, 3), dtype=np.uint8)
 
-    # Preprocess each frame: crop → resize
-    processed: list[np.ndarray] = [
-        _resize(_center_crop_square(f), target_size) for f in raw_frames
-    ]
-
-    # Subsample to target_fps
-    total = len(processed)
+    # Subsample first, then preprocess only the selected frames
+    total = len(raw_frames)
     duration_s = total / native_fps
     n_output = max(1, int(round(duration_s * target_fps)))
     indices = np.linspace(0, total - 1, n_output, dtype=int)
 
-    return np.stack([processed[i] for i in indices])
+    return np.stack([
+        _resize(_center_crop_square(raw_frames[i]), target_size) for i in indices
+    ])
 
 
 def extract_frames(mp4_bytes: bytes, n_frames: int = 8) -> np.ndarray:
