@@ -1,0 +1,55 @@
+[project]
+name = "rdf"
+version = "0.1.0"
+description = "Robot Data-Filtering Pipeline"
+requires-python = ">=3.10"
+
+dependencies = [
+    "pydantic>=2.0",
+    "structlog>=24.0",
+    "pyyaml>=6.0",
+    "click>=8.0",
+    "requests>=2.32",
+    "pyarrow>=14.0",
+    "boto3>=1.28",
+]
+
+[project.optional-dependencies]
+harness = [
+    "pydantic>=2.0",
+    "structlog>=24.0",
+    "pyyaml>=6.0",
+    "click>=8.0",
+    "requests>=2.32",
+    "pyarrow>=14.0",
+    "boto3>=1.28",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "moto[s3,sqs,dynamodb]>=5.0",
+    "ruff>=0.4",
+    "pre-commit>=3.0",
+]
+
+[project.scripts]
+rdf = "rdf.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rdf"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = ["T201"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
