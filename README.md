@@ -77,6 +77,25 @@ Robometer scores ranged from `success_pred=0.86–0.97`. All 30 clean episodes p
 
 ## Full end-to-end run (from scratch)
 
+### Prerequisites — WandB stub
+
+The DemInf training script calls `wandb.init()` with `mode="online"`. Since no WandB account is configured, create a stub that intercepts the call so training proceeds normally:
+
+```bash
+mkdir -p /tmp/wandb_stub/wandb
+cat > /tmp/wandb_stub/wandb/__init__.py << 'EOF'
+run = None
+class _Run:
+    config = {}; name = "stub-run"; id = "stub-id"; dir = "/tmp"; summary = {}
+    def log(self, *a, **kw): pass
+    def finish(self): pass
+def init(**kwargs):
+    global run; run = _Run(); return run
+def log(*a, **kw): pass
+def finish(**kw): global run; run = None
+EOF
+```
+
 ### Step 1 — Preprocess + Stage A + prepare DemInf data
 
 ```bash
@@ -84,23 +103,25 @@ cd /data/reward_model
 /data/robometer/.venv/bin/python3 -u scripts/preprocess_and_score.py
 ```
 
-This:
-- Decodes 30 episodes with decord → `preprocessed/{ep}.npz`
-- Starts Robometer eval server, scores all episodes, stops server
-- Symlinks passing episodes to `deminf_data/{train,test}/`
+This runs three phases in sequence:
+1. Decodes all episodes with decord → `preprocessed/{ep}.npz` cache
+2. Starts Robometer eval server, scores all cached episodes, stops server
+3. Symlinks passing episodes into `deminf_data/{train,test}/` (80/20 split)
 
-### Step 2 — Preprocess MCAP + train DemInf VAE
+Control with env vars: `RDF_N_EPISODES` (default: 30), `RDF_THRESHOLD` (default: 0.5).
+
+### Step 2 — Cache MCAP files + train DemInf VAE
 
 ```bash
 cd /data/demonstration-information
 
-# Cache MCAP → .npz for fast training
+# Cache MCAP → .npz for fast training (idempotent — skips already-cached)
 /data/.conda/envs/openx/bin/python3 scripts/preprocess_episodes.py \
     --root /tmp/rdf_pipeline_deminf/deminf_data \
     --splits train test \
     --workers 4
 
-# Train BetaVAE (joint state+action, z=18)
+# Train BetaVAE (joint state+action, z=18) — ~3 min for 1000 steps
 PYTHONPATH=/tmp/wandb_stub \
 /data/.conda/envs/openx/bin/python3 scripts/train.py \
     --config /data/reward_model/configs/quality/clean_data_vae.py:sa \
@@ -108,21 +129,43 @@ PYTHONPATH=/tmp/wandb_stub \
     --name clean_data_vae
 ```
 
-Checkpoint saved under `/tmp/rdf_deminf_ckpts/clean_data_vae_<timestamp>/1000/`.
+Checkpoint saved under `/tmp/rdf_deminf_ckpts/clean_data_vae_<timestamp>/`. The step-1000 checkpoint is at `.../1000/`.
 
 ### Step 3 — Score all episodes with the DemInf VAE
 
-```bash
-cd /data/demonstration-information
+Set `CKPT` to the actual timestamp directory from Step 2:
 
-# Score train split
-RDF_DEMINF_CKPT=/tmp/rdf_deminf_ckpts/clean_data_vae_<timestamp>/1000 \
+```bash
+CKPT=$(ls -dt /tmp/rdf_deminf_ckpts/*/1000 | head -1)  # latest checkpoint
+
+# Score train split → /tmp/rdf_deminf_scores.json
+RDF_DEMINF_CKPT=$CKPT \
 RDF_DEMINF_DATA=/tmp/rdf_pipeline_deminf/deminf_data \
 RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.json \
 RDF_DEMINF_SPLIT=train \
-PYTHONPATH=/tmp/wandb_stub \
 /data/.conda/envs/openx/bin/python3 -u \
     /data/reward_model/scripts/deminf_score_episodes.py
+
+# Score test split → /tmp/rdf_deminf_scores_test.json
+RDF_DEMINF_CKPT=$CKPT \
+RDF_DEMINF_DATA=/tmp/rdf_pipeline_deminf/deminf_data \
+RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores_test.json \
+RDF_DEMINF_SPLIT=test \
+/data/.conda/envs/openx/bin/python3 -u \
+    /data/reward_model/scripts/deminf_score_episodes.py
+
+# Merge train + test scores into one file
+/data/.conda/envs/openx/bin/python3 -c "
+import json, math
+train = json.load(open('/tmp/rdf_deminf_scores.json'))
+test  = json.load(open('/tmp/rdf_deminf_scores_test.json'))
+merged = dict(train['scores'])
+for ep, s in test['scores'].items():
+    merged[ep] = s if not math.isnan(s) else 0.0
+json.dump({'scores': merged, 'split': 'train+test', 'ckpt': train['ckpt']},
+          open('/tmp/rdf_deminf_scores.json', 'w'), indent=2)
+print(f'Merged {len(merged)} episodes')
+"
 ```
 
 Per-episode kSG MI scores written to `/tmp/rdf_deminf_scores.json`.
@@ -132,6 +175,8 @@ Per-episode kSG MI scores written to `/tmp/rdf_deminf_scores.json`.
 ```bash
 cd /data/reward_model
 
+# RDF_MAX_EPISODES limits Stage A to the first N episodes in /data/clean_data/
+# (sorted by name). Set to the number of episodes you preprocessed in Step 1.
 RDF_MODELS=real \
 RDF_MAX_EPISODES=30 \
 RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.json \
@@ -139,7 +184,7 @@ RDF_DEMINF_THRESHOLD=-10.0 \
 /data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
 ```
 
-This automatically starts and stops the Robometer eval server for Stage A, then uses the pre-computed DemInf scores for Stage B.
+This automatically starts the Robometer eval server for Stage A, stops it after scoring, then uses the pre-computed DemInf scores for Stage B. Results are written to the SQLite catalog at `/tmp/rdf_integration/catalog/catalog.db`.
 
 ---
 
