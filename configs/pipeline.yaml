@@ -8,7 +8,7 @@ robometer_threshold: 0.5
 
 # Stage B trim: episodes with deminf_score < this are dropped
 # Typical range: -20 (permissive) to 0 (strict). Default -10 keeps most passes.
-deminf_threshold: -10.0
+deminf_threshold: -1.0
 
 # ── Versioning ────────────────────────────────────────────────────────────────
 
