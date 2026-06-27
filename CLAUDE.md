@@ -21,7 +21,7 @@ ruff format --check src/ tests/
 /data/.conda/envs/openx/bin/python3 -m pytest tests/test_stage_a.py::test_worker_idempotent -v
 
 # Full end-to-end pipeline (real models, GPU required — see README for prerequisites)
-RDF_MODELS=real RDF_MAX_EPISODES=30 RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.json \
+RDF_MODELS=real RDF_MAX_EPISODES=30 RDF_DEMINF_SCORES=/data/reward_model_files/rdf_deminf_scores.json \
     /data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
 ```
 
@@ -34,7 +34,7 @@ RDF_MODELS=real RDF_MAX_EPISODES=30 RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.jso
 | robometer uv | `/data/robometer/.venv/bin/python3` | Harness, Stage A (decord, torch, fastapi) |
 | openx conda | `/data/.conda/envs/openx/bin/python3` | DemInf training + scoring (JAX, flax, TF, mcap); also runs tests |
 
-The two envs communicate via a JSON file (`/tmp/rdf_deminf_scores.json`). DemInf scoring writes scores once; the harness reads them as a lookup table. **No subprocess per episode; both models load once.**
+The two envs communicate via a JSON file (`/data/reward_model_files/rdf_deminf_scores.json`). DemInf scoring writes scores once; the harness reads them as a lookup table. **No subprocess per episode; both models load once.**
 
 Both upstream repos are imported by path — never install them inside this repo:
 - `/data/robometer` → `sys.path` for Robometer
@@ -47,14 +47,14 @@ Both upstream repos are imported by path — never install them inside this repo
         ↓
 scripts/preprocess_and_score.py       decord decode → .npz cache + Stage A scoring
         ↓
-scripts/deminf_score_episodes.py      [openx env] JAX VAE scoring → /tmp/rdf_deminf_scores.json
+scripts/deminf_score_episodes.py      [openx env] JAX VAE scoring → /data/reward_model_files/rdf_deminf_scores.json
         ↓
 scripts/run_local_pipeline.py         ingestion → Stage A → cohort → Stage B → decision → SQLite
 ```
 
 `run_local_pipeline.py` (real mode) loads `RobometerLocalWorker` in-process — no FastAPI server. Stage B (`infer_worker.py`) reads the pre-computed JSON scores via `DeminfWorker` — no JAX in the harness process.
 
-SQLite catalog lives at `/tmp/rdf_integration/catalog/catalog.db` (persists across runs, idempotent on re-scoring). To reset and re-run from scratch: `rm -rf /tmp/rdf_integration`.
+SQLite catalog lives at `/data/reward_model_files/rdf_integration/catalog/catalog.db` (persists across runs, idempotent on re-scoring). To reset and re-run from scratch: `rm -rf /data/reward_model_files/rdf_integration`.
 
 ## Stage A streaming execution model
 
@@ -73,7 +73,7 @@ Stage A (Robometer scoring) uses a producer-consumer pattern in real runs:
 - `src/rdf/harness/queue.py` — `LocalQueue` (SQLite) and `SqsQueue`. Dedup via `dedup_id` on enqueue.
 - `src/rdf/harness/video.py` — `preprocess_video()`: decodes MP4, subsamples on-the-fly at `i % step == 0` (never buffers all frames), center-crops to square, resizes to 256×256 at 2 fps.
 - `src/rdf/models/robometer_worker.py` — `RobometerLocalWorker` (preferred: in-process checkpoint load via `load_model_from_hf`) and `RobometerWorker` (legacy HTTP client to eval_server sidecar).
-- `src/rdf/models/deminf_worker.py` — reads `/tmp/rdf_deminf_scores.json`; `score_episodes_by_id()` fast-path bypasses MCAP loading entirely.
+- `src/rdf/models/deminf_worker.py` — reads `/data/reward_model_files/rdf_deminf_scores.json`; `score_episodes_by_id()` fast-path bypasses MCAP loading entirely.
 - `src/rdf/stage_b_deminf/infer_worker.py` — polls cohort queue → calls `score_episodes_by_id` → writes to catalog. Checks `hasattr(model, "score_episodes_by_id")` first to skip MCAP loading for `DeminfWorker`.
 - `src/rdf/models/registry.py` — `VaeRegistry` stores orbax checkpoints + `reference_latents.npz` in the object store under `registry/task=<task>/vae_version=<v>/`.
 - `configs/embodiments/<name>.yaml` — MCAP topic names per robot. Missing file → defaults (`/obs/rgb`, `/action`). **Real topic names are not yet filled in** (`# DECISION-NEEDED` in code).

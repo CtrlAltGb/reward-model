@@ -12,8 +12,8 @@ Run with:
 
 Env vars:
     RDF_DEMINF_CKPT      path to checkpoint step dir (e.g. .../1000)
-    RDF_DEMINF_DATA      data root (default: /tmp/rdf_pipeline_deminf/deminf_data)
-    RDF_DEMINF_SCORES    output JSON path (default: /tmp/rdf_deminf_scores.json)
+    RDF_DEMINF_DATA      data root (default: /data/reward_model_files/rdf_pipeline_deminf/deminf_data)
+    RDF_DEMINF_SCORES    output JSON path (default: /data/reward_model_files/rdf_deminf_scores.json)
     RDF_DEMINF_SPLIT     dataset split to score (default: train)
 """
 from __future__ import annotations
@@ -41,12 +41,12 @@ import quality_estimators
 
 CKPT = os.environ.get(
     "RDF_DEMINF_CKPT",
-    sorted(Path("/tmp/rdf_deminf_ckpts").glob("*/1000"))[-1]
-    if list(Path("/tmp/rdf_deminf_ckpts").glob("*/1000"))
+    sorted(Path("/data/reward_model_files/rdf_deminf_ckpts").glob("*/1000"))[-1]
+    if list(Path("/data/reward_model_files/rdf_deminf_ckpts").glob("*/1000"))
     else "",
 )
-DATA_ROOT = Path(os.environ.get("RDF_DEMINF_DATA", "/tmp/rdf_pipeline_deminf/deminf_data"))
-SCORES_OUT = Path(os.environ.get("RDF_DEMINF_SCORES", "/tmp/rdf_deminf_scores.json"))
+DATA_ROOT = Path(os.environ.get("RDF_DEMINF_DATA", "/data/reward_model_files/rdf_pipeline_deminf/deminf_data"))
+SCORES_OUT = Path(os.environ.get("RDF_DEMINF_SCORES", "/data/reward_model_files/rdf_deminf_scores.json"))
 SPLIT = os.environ.get("RDF_DEMINF_SPLIT", "train")
 
 

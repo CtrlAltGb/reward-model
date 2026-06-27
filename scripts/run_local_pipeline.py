@@ -6,8 +6,7 @@ that reads directly from /data/clean_data/ without copying any files.
 
 Usage:
     cd /data/reward_model
-    RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.json \\
-        /data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
+    /data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
 """
 
 from __future__ import annotations
@@ -35,10 +34,10 @@ from rdf.stage_b_deminf.infer_worker import run_infer_worker as run_stage_b
 from rdf.decision.decide import decide_all
 
 CLEAN_DATA = Path("/data/clean_data")
-SCRATCH = Path("/tmp/rdf_integration")
+SCRATCH = Path("/data/reward_model_files/rdf_integration")
 SCRATCH.mkdir(parents=True, exist_ok=True)
 
-DEMINF_DATA = Path(os.environ.get("RDF_DEMINF_DATA", "/tmp/rdf_pipeline_deminf/deminf_data"))
+DEMINF_DATA = Path(os.environ.get("RDF_DEMINF_DATA", "/data/reward_model_files/rdf_pipeline_deminf/deminf_data"))
 _OPENX_PYTHON = "/data/.conda/envs/openx/bin/python3"
 _DEMINF_SCORE_SCRIPT = Path(__file__).parent / "deminf_score_episodes.py"
 
@@ -76,7 +75,7 @@ def _run_deminf_scoring(scores_out: str) -> None:
     """Run deminf_score_episodes.py in the openx conda env (blocking).
 
     Uses DEMINF_DATA as the data root and writes scores to scores_out.
-    Checkpoint is auto-detected from /tmp/rdf_deminf_ckpts/*/1000.
+    Checkpoint is auto-detected from /data/reward_model_files/rdf_deminf_ckpts/*/1000.
     Raises RuntimeError if the subprocess exits non-zero.
     """
     import subprocess
@@ -302,7 +301,7 @@ def main():
     print(f"  Time: {elapsed_a:.1f}s  ({ms_per:.0f}ms/episode)\n")
 
     # --- DemInf scoring (runs in openx env as subprocess) ---
-    deminf_scores_file = os.environ.get("RDF_DEMINF_SCORES", "/tmp/rdf_deminf_scores.json")
+    deminf_scores_file = os.environ.get("RDF_DEMINF_SCORES", "/data/reward_model_files/rdf_deminf_scores.json")
     print("[ DemInf Scoring ]")
     added = _setup_deminf_data(manifests)
     n_train = len(list((DEMINF_DATA / "train").iterdir()))
