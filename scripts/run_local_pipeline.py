@@ -465,8 +465,19 @@ def main():
 
     # --- DemInf scoring (runs in openx env as subprocess) ---
     print("[ DemInf Scoring ]")
-    added = _setup_deminf_data(manifests)
-    task_ids = sorted({m.task_id for m in manifests})
+
+    # Only process episodes that passed Stage A — drops are excluded from DemInf entirely.
+    pass_ep_ids = {
+        r.episode_id
+        for task in all_tasks
+        for r in catalog.rows_for_task(task)
+        if r.robometer_pass is True
+    }
+    pass_manifests = [m for m in manifests if m.episode_id in pass_ep_ids]
+    print(f"  Stage A pass: {len(pass_manifests)}/{len(manifests)} episodes forwarded to DemInf")
+
+    added = _setup_deminf_data(pass_manifests)
+    task_ids = sorted({m.task_id for m in pass_manifests})
     n_total = sum(
         len(list((DEMINF_DATA / tid / "train").iterdir()))
         for tid in task_ids
@@ -489,24 +500,21 @@ def main():
                 f" ({_models.deminf_train_episodes} episodes, {_models.deminf_train_steps} steps) …",
                 flush=True,
             )
-            pass_ep_ids = [
-                r.episode_id
-                for task in all_tasks
-                for r in catalog.rows_for_task(task)
-                if r.robometer_pass and r.episode_id in {m.episode_id for m in manifests if m.task_id == task_id}
+            task_pass_ep_ids = [
+                m.episode_id for m in pass_manifests if m.task_id == task_id
             ]
             t_train = time.monotonic()
-            ckpt = _train_deminf_for_task(task_id, pass_ep_ids)
+            ckpt = _train_deminf_for_task(task_id, task_pass_ep_ids)
             print(f"  Training complete in {time.monotonic() - t_train:.1f}s  ckpt={ckpt}")
         ckpts_by_task[task_id] = ckpt
 
-    # Preprocess any uncached episodes before scoring (idempotent)
+    # Preprocess any uncached pass episodes before scoring (idempotent)
     for task_id in task_ids:
         _preprocess_deminf_data(task_id, splits=["train"])
 
     print(f"  Running deminf_score_episodes.py for task_ids={task_ids} (openx env) …", flush=True)
     t_deminf = time.monotonic()
-    _run_deminf_scoring(manifests, ckpts_by_task)
+    _run_deminf_scoring(pass_manifests, ckpts_by_task)
     elapsed_deminf = time.monotonic() - t_deminf
     print(f"  DemInf scoring complete in {elapsed_deminf:.1f}s\n")
 
