@@ -115,19 +115,51 @@ def _setup_training_data(task_id: str, pass_episode_ids: list[str]) -> None:
                 dst.symlink_to(src)
 
 
+def _preprocess_deminf_data(task_id: str, splits: list[str]) -> None:
+    """Generate _cached.npz files for the given splits before training.
+
+    Runs preprocess_episodes.py in the openx conda env so the training
+    dataloader never has to parse raw MCAP files.  Idempotent — already-cached
+    episodes are skipped.
+    """
+    import subprocess
+
+    preprocess_script = Path(_paths.deminf_root) / "scripts" / "preprocess_episodes.py"
+    task_data = DEMINF_DATA / task_id
+    proc = subprocess.run(
+        [
+            _OPENX_PYTHON,
+            str(preprocess_script),
+            f"--root={task_data}",
+            "--splits", *splits,
+            f"--workers={_models.video_preprocess_workers}",
+        ],
+        cwd=_paths.deminf_root,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"DemInf preprocessing failed for task_id={task_id!r} splits={splits}"
+            f" (exit {proc.returncode})"
+        )
+
+
 def _train_deminf_for_task(task_id: str, pass_episode_ids: list[str]) -> str:
     """Train a DemInf VAE for task_id and return the checkpoint path.
 
-    Runs scripts/train.py in the openx conda env.  Training data is limited to
-    the first deminf_train_episodes Stage-A-pass episodes.  Saves checkpoints
-    to deminf_ckpts_dir/{task_id}/clean_data_vae/ every deminf_train_save_freq
-    steps; total steps = deminf_train_steps.
+    Steps:
+      1. Create train_sel/ and test_sel/ symlinks (subset of pass episodes).
+      2. Preprocess those episodes to _cached.npz so training loads instantly.
+      3. Run scripts/train.py in the openx conda env.
+
+    Saves checkpoints to deminf_ckpts_dir/{task_id}/clean_data_vae/ every
+    deminf_train_save_freq steps; total steps = deminf_train_steps.
     """
     import subprocess
 
     output_dir = Path(_paths.deminf_ckpts_dir) / task_id
     output_dir.mkdir(parents=True, exist_ok=True)
     _setup_training_data(task_id, pass_episode_ids)
+    _preprocess_deminf_data(task_id, splits=["train_sel", "test_sel"])
 
     train_script = Path(_paths.deminf_root) / "scripts" / "train.py"
     config_path = Path(__file__).parent.parent / "configs" / "quality" / "clean_data_vae.py"
@@ -467,6 +499,10 @@ def main():
             ckpt = _train_deminf_for_task(task_id, pass_ep_ids)
             print(f"  Training complete in {time.monotonic() - t_train:.1f}s  ckpt={ckpt}")
         ckpts_by_task[task_id] = ckpt
+
+    # Preprocess any uncached episodes before scoring (idempotent)
+    for task_id in task_ids:
+        _preprocess_deminf_data(task_id, splits=["train"])
 
     print(f"  Running deminf_score_episodes.py for task_ids={task_ids} (openx env) …", flush=True)
     t_deminf = time.monotonic()
