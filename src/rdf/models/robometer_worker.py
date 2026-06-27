@@ -167,9 +167,17 @@ class RobometerLocalWorker:
             getattr(loss_config, "progress_discrete_bins", None)
             or getattr(exp_config.model, "progress_discrete_bins", 10)
         )
+        # Model was trained on max_frames frames — subsample to this count at inference
+        # to match training distribution and avoid 3-5× token overhead from longer videos.
+        self._max_frames: int = getattr(exp_config.data, "max_frames", 8) or 8
 
     def score_episode_from_frames(self, frames: np.ndarray, instruction: str) -> RobometerScore:
         import torch
+
+        # Subsample to max_frames evenly spaced across the episode.
+        if len(frames) > self._max_frames:
+            idx = np.linspace(0, len(frames) - 1, self._max_frames, dtype=int)
+            frames = frames[idx]
 
         T = int(frames.shape[0])
         traj = self._Trajectory(
