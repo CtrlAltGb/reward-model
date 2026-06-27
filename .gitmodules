@@ -1,0 +1,6 @@
+[submodule "robometer"]
+	path = robometer
+	url = https://github.com/CtrlAltGb/robometer.git
+[submodule "demonstration-information"]
+	path = demonstration-information
+	url = https://github.com/CtrlAltGb/demonstration-information.git
