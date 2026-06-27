@@ -4,25 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-All commands run from `/data/reward_model`. The harness (`src/rdf/`) runs in the **robometer uv env**; DemInf scoring runs in the **openx conda env**. These are intentionally separate.
+All commands run from `/data/reward_model`. The harness (`src/rdf/`) runs in the **robometer uv env**; DemInf scoring runs in the **openx conda env**. These are intentionally separate — never merge them.
 
 ```bash
 # Lint
 ruff check src/ tests/
 ruff format --check src/ tests/
 
-# Unit + integration tests (mock mode, no GPU, no upstream repos needed)
+# Tests (no GPU needed)
 /data/.conda/envs/openx/bin/python3 -m pytest tests/ -v --tb=short
 
-# Single test file
-/data/.conda/envs/openx/bin/python3 -m pytest tests/test_e2e.py -v --tb=short
-
 # Single test
-/data/.conda/envs/openx/bin/python3 -m pytest tests/test_stage_a.py::test_worker_idempotent -v
+/data/.conda/envs/openx/bin/python3 -m pytest tests/test_decision.py -v --tb=short
 
-# Full end-to-end pipeline (real models, GPU required — see README for prerequisites)
-RDF_MODELS=real RDF_MAX_EPISODES=30 RDF_DEMINF_SCORES=/data/reward_model_files/rdf_deminf_scores.json \
-    /data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
+# Full end-to-end pipeline (real models, GPU required)
+/data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
+
+# Smoke test (first 30 episodes only)
+RDF_MAX_EPISODES=30 /data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
 ```
 
 ## Two-environment architecture
@@ -31,10 +30,10 @@ RDF_MODELS=real RDF_MAX_EPISODES=30 RDF_DEMINF_SCORES=/data/reward_model_files/r
 
 | Env | Location | Used for |
 |-----|----------|----------|
-| robometer uv | `/data/robometer/.venv/bin/python3` | Harness, Stage A (decord, torch, fastapi) |
-| openx conda | `/data/.conda/envs/openx/bin/python3` | DemInf training + scoring (JAX, flax, TF, mcap); also runs tests |
+| robometer uv | `/data/robometer/.venv/bin/python3` | Harness, Stage A (decord, torch) |
+| openx conda | `/data/.conda/envs/openx/bin/python3` | DemInf scoring (JAX, flax, TF, mcap); also runs tests |
 
-The two envs communicate via a JSON file (`/data/reward_model_files/rdf_deminf_scores.json`). DemInf scoring writes scores once; the harness reads them as a lookup table. **No subprocess per episode; both models load once.**
+The two envs communicate via a JSON file (`/data/reward_model_files/rdf_deminf_scores.json`). DemInf scoring writes scores once as a subprocess; the harness reads them as a lookup table. **No subprocess per episode; both models load once.**
 
 Both upstream repos are imported by path — never install them inside this repo:
 - `/data/robometer` → `sys.path` for Robometer
@@ -45,49 +44,53 @@ Both upstream repos are imported by path — never install them inside this repo
 ```
 /data/clean_data/                     raw episodes (MCAP + MP4 + metadata.yaml)
         ↓
-scripts/preprocess_and_score.py       decord decode → .npz cache + Stage A scoring
-        ↓
-scripts/deminf_score_episodes.py      [openx env] JAX VAE scoring → /data/reward_model_files/rdf_deminf_scores.json
-        ↓
-scripts/run_local_pipeline.py         ingestion → Stage A → cohort → Stage B → decision → SQLite
+scripts/run_local_pipeline.py         ingestion → Stage A (streaming) → DemInf scoring subprocess
+        ↓                                       → Stage B → decision → SQLite
+/data/reward_model_files/
+  rdf_integration/catalog/catalog.db  SQLite: full CatalogRow per episode
+  rdf_deminf_scores.json              per-episode DemInf scores (written each run)
+  rdf_pipeline_deminf/deminf_data/    episode symlinks + _cached.npz (speeds up re-runs)
+  rdf_deminf_ckpts/                   pre-trained VAE checkpoint
 ```
 
-`run_local_pipeline.py` (real mode) loads `RobometerLocalWorker` in-process — no FastAPI server. Stage B (`infer_worker.py`) reads the pre-computed JSON scores via `DeminfWorker` — no JAX in the harness process.
+`run_local_pipeline.py` loads `RobometerLocalWorker` in-process — no FastAPI server. Stage B (`infer_worker.py`) reads the pre-computed JSON scores via `DeminfWorker` — no JAX in the harness process.
 
-SQLite catalog lives at `/data/reward_model_files/rdf_integration/catalog/catalog.db` (persists across runs, idempotent on re-scoring). To reset and re-run from scratch: `rm -rf /data/reward_model_files/rdf_integration`.
+To reset and re-run from scratch: `rm -rf /data/reward_model_files/rdf_integration`
 
 ## Stage A streaming execution model
 
-Stage A (Robometer scoring) uses a producer-consumer pattern in real runs:
+Stage A uses a producer-consumer pattern:
 
-1. **Producer thread** — `stream_episodes()` drains the episode queue, fetches MP4 bytes, and preprocesses videos in a `ThreadPoolExecutor` (8 workers). Emits `(msg, manifest, frames, error)` tuples into a `threading.Queue(maxsize=8)` as each finishes (`as_completed` order). Puts `None` sentinel when done.
-2. **Main thread** — loads `RobometerLocalWorker` concurrently while the producer runs.
-3. **Consumer** — `run_worker(decoded_stream=...)` starts scoring the moment the model is ready and the first decoded episode arrives. No barrier between decode and score.
+1. **Producer thread** — `stream_episodes()` drains the episode queue, preprocesses videos in a `ThreadPoolExecutor` (8 workers), emits `(msg, manifest, frames, error)` tuples into a `threading.Queue(maxsize=8)` via `as_completed`. Puts `None` sentinel when done.
+2. **Main thread** — loads `RobometerLocalWorker` concurrently while the producer runs (~70s model load).
+3. **Consumer** — `run_worker(decoded_stream=...)` scores immediately when model is ready and first episode arrives. No barrier between decode and score.
 
-`run_worker()` also accepts `prefetched=` (batch mode, used in tests) or neither (inline fallback). Tests always use the inline/mock path.
+Frame subsampling: `RobometerLocalWorker` reads `max_frames=8` from `exp_config.data` and subsamples with `np.linspace` before scoring. Passing more frames to the VLM slows it significantly (trained on 8 frames).
+
+**Typical performance on 177 episodes**: Stage A ~95s (530ms/ep), DemInf ~23s (cached npz) or ~528s (first run, JAX JIT + MCAP parse), total ~190s cached / ~695s fresh.
+
+## DemInf VAE
+
+- State-only VAE (`obs keys: ['state']`, no images) — scores based on proprioceptive state+action KSG mutual information.
+- Active checkpoint: `/data/reward_model_files/rdf_deminf_ckpts/clean_data_vae_20260626_181842/1000`
+- Training code lives in `src/rdf/stage_b_deminf/train_job.py` (not called in pipeline — VAE is pre-trained). Re-training would use `scripts/train.py` in the openx env.
+- MCAP topics: `/observation/state`, `/action`, `/episode/status`
 
 ## Key source locations
 
 - `src/rdf/schemas/models.py` — all frozen Pydantic schemas (`CatalogRow`, `CohortMessage`, `EpisodeManifest`, etc.). Change here first when adding fields.
-- `src/rdf/harness/catalog.py` — `LocalCatalog` (SQLite) and `AwsCatalog` (DynamoDB). The catalog stores full `CatalogRow` JSON per episode.
+- `src/rdf/harness/catalog.py` — `LocalCatalog` (SQLite) and `AwsCatalog` (DynamoDB).
 - `src/rdf/harness/queue.py` — `LocalQueue` (SQLite) and `SqsQueue`. Dedup via `dedup_id` on enqueue.
-- `src/rdf/harness/video.py` — `preprocess_video()`: decodes MP4, subsamples on-the-fly at `i % step == 0` (never buffers all frames), center-crops to square, resizes to 256×256 at 2 fps.
-- `src/rdf/models/robometer_worker.py` — `RobometerLocalWorker` (preferred: in-process checkpoint load via `load_model_from_hf`) and `RobometerWorker` (legacy HTTP client to eval_server sidecar).
-- `src/rdf/models/deminf_worker.py` — reads `/data/reward_model_files/rdf_deminf_scores.json`; `score_episodes_by_id()` fast-path bypasses MCAP loading entirely.
-- `src/rdf/stage_b_deminf/infer_worker.py` — polls cohort queue → calls `score_episodes_by_id` → writes to catalog. Checks `hasattr(model, "score_episodes_by_id")` first to skip MCAP loading for `DeminfWorker`.
-- `src/rdf/models/registry.py` — `VaeRegistry` stores orbax checkpoints + `reference_latents.npz` in the object store under `registry/task=<task>/vae_version=<v>/`.
-- `configs/embodiments/<name>.yaml` — MCAP topic names per robot. Missing file → defaults (`/obs/rgb`, `/action`). **Real topic names are not yet filled in** (`# DECISION-NEEDED` in code).
-
-## Testing approach
-
-All tests run in mock mode (`RDF_MODELS=mock`). The `conftest.py` sets this as default. Mocks (`src/rdf/models/mock.py`) are deterministic via seed and track `__init__` call counts to assert models load exactly once. `SyntheticMcapReader` provides fake MCAP bytes for Stage B without real files.
-
-`tests/test_e2e.py` runs the full pipeline (ingestion → Stage A → cohort → Stage B → decision → materialize) against in-memory SQLite/local-fs backends.
+- `src/rdf/harness/video.py` — `preprocess_video()`: decodes MP4, subsamples at `i % step == 0`, center-crops to square, resizes to 256×256 at 2 fps.
+- `src/rdf/models/robometer_worker.py` — `RobometerLocalWorker` (in-process checkpoint load via `load_model_from_hf`).
+- `src/rdf/models/deminf_worker.py` — reads `rdf_deminf_scores.json`; `score_episodes_by_id()` bypasses MCAP entirely.
+- `src/rdf/stage_b_deminf/infer_worker.py` — polls cohort queue → `score_episodes_by_id` → catalog. Checks `hasattr(model, "score_episodes_by_id")` to skip MCAP loading.
+- `src/rdf/models/registry.py` — `VaeRegistry` for publishing/loading VAE checkpoints to object store.
+- `configs/quality/clean_data_vae.py` — DemInf VAE training config used by `deminf_score_episodes.py`.
 
 ## Important constraints
 
 - **Do not modify `/data/robometer` or `/data/demonstration-information`** — import only.
 - **Do not add JAX/torch to the robometer venv** or vice versa — the env split is intentional.
-- The WandB stub at `/tmp/wandb_stub/wandb/__init__.py` must exist before running DemInf training (see README).
+- `accumulate_sequential` only emits a cohort for episodes where `robometer_pass is True`. If Stage A produces no passes, Stage B is skipped entirely.
 - `EmbodimentConfig` defaults to synthetic topics (`/obs/rgb`, `/action`) when no yaml exists — real MCAP parsing returns empty arrays, not an error. Stage B still writes scores because `DeminfWorker.score_episodes_by_id` bypasses MCAP entirely.
-- `accumulate_sequential` only emits a cohort for episodes where `robometer_pass is True`. If Stage A produces no passes, no cohorts are emitted and Stage B is skipped.
