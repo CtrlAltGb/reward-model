@@ -11,3 +11,4 @@ build/
 .ruff_cache/
 *.db
 /tmp/
+unsloth_compiled_cache/
