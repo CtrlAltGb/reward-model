@@ -585,6 +585,14 @@ def main():
             passed = "YES" if r.robometer_pass else "NO"
             print(f"  {r.episode_id:<20} {rob:>10} {passed:>6} {deminf_s:>10} {r.final_decision:>10}")
 
+    # --- Cleanup: remove cached .npz files now that scoring is done ---
+    removed = 0
+    for npz in DEMINF_DATA.rglob("*_cached.npz"):
+        npz.unlink()
+        removed += 1
+    if removed:
+        print(f"\n  Cleaned up {removed} cached .npz files from {DEMINF_DATA}")
+
 
 if __name__ == "__main__":
     main()
