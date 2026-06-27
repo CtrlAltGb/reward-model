@@ -174,3 +174,7 @@ class ModelsConfig(BaseModel):
     deminf_estimator: str = "ksg"
     deminf_batch_size: int = 32
     deminf_split: str = "train"
+    # DemInf VAE training (auto-triggered when no checkpoint exists for a task_id)
+    deminf_train_steps: int = 5000
+    deminf_train_episodes: int = 50
+    deminf_train_save_freq: int = 1000

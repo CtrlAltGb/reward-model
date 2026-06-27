@@ -37,3 +37,14 @@ deminf_batch_size: 32
 
 # Dataset split scored by deminf_score_episodes.py
 deminf_split: train
+
+# ── DemInf VAE auto-training (triggered when no checkpoint exists for a task_id) ──
+
+# Total training steps for a newly trained VAE
+deminf_train_steps: 5000
+
+# Max Stage-A-pass episodes to use for training (oldest-first selection)
+deminf_train_episodes: 50
+
+# Checkpoint save frequency (checkpoints saved at every multiple of this step)
+deminf_train_save_freq: 1000

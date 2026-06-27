@@ -78,12 +78,96 @@ def _setup_deminf_data(manifests: list) -> int:
     return added
 
 
-def _run_deminf_scoring(manifests: list) -> None:
-    """Run deminf_score_episodes.py once per task_id, merge results.
+def _get_checkpoint_for_task(task_id: str) -> str | None:
+    """Return the best checkpoint path for task_id, or None if none exist.
 
-    Each run gets RDF_DEMINF_DATA pointing at DEMINF_DATA/{task_id} so the
-    scorer sees train/ directly.  Per-task scores are merged into the single
-    shared scores file at paths_config.deminf_scores_file.
+    Prefers the configured deminf_train_steps checkpoint; falls back to the
+    highest available step if that exact step hasn't been saved yet.
+    """
+    task_ckpt_dir = Path(_paths.deminf_ckpts_dir) / task_id
+    if not task_ckpt_dir.exists():
+        return None
+    exact = sorted(task_ckpt_dir.glob(f"*/{_models.deminf_train_steps}"))
+    if exact:
+        return str(exact[-1])
+    all_steps = sorted(
+        task_ckpt_dir.glob("*/[0-9]*"),
+        key=lambda p: int(p.name),
+    )
+    return str(all_steps[-1]) if all_steps else None
+
+
+def _setup_training_data(task_id: str, pass_episode_ids: list[str]) -> None:
+    """Create train_sel/ and test_sel/ under DEMINF_DATA/{task_id} for VAE training.
+
+    Symlinks up to deminf_train_episodes Stage-A-pass episodes into train_sel/.
+    Uses the first 5 of those as the validation split (test_sel/).
+    """
+    selected = pass_episode_ids[: _models.deminf_train_episodes]
+    task_data = DEMINF_DATA / task_id
+    for split_name, eps in [("train_sel", selected), ("test_sel", selected[:5])]:
+        split_dir = task_data / split_name
+        split_dir.mkdir(exist_ok=True)
+        for ep_id in eps:
+            src = task_data / "train" / ep_id
+            dst = split_dir / ep_id
+            if src.exists() and not dst.exists():
+                dst.symlink_to(src)
+
+
+def _train_deminf_for_task(task_id: str, pass_episode_ids: list[str]) -> str:
+    """Train a DemInf VAE for task_id and return the checkpoint path.
+
+    Runs scripts/train.py in the openx conda env.  Training data is limited to
+    the first deminf_train_episodes Stage-A-pass episodes.  Saves checkpoints
+    to deminf_ckpts_dir/{task_id}/clean_data_vae/ every deminf_train_save_freq
+    steps; total steps = deminf_train_steps.
+    """
+    import subprocess
+
+    output_dir = Path(_paths.deminf_ckpts_dir) / task_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _setup_training_data(task_id, pass_episode_ids)
+
+    train_script = Path(_paths.deminf_root) / "scripts" / "train.py"
+    config_path = Path(__file__).parent.parent / "configs" / "quality" / "clean_data_vae.py"
+
+    env = os.environ.copy()
+    env["RDF_DEMINF_DATA"] = str(DEMINF_DATA / task_id)
+
+    proc = subprocess.run(
+        [
+            _OPENX_PYTHON,
+            str(train_script),
+            f"--config={config_path}:sa",
+            f"--path={output_dir}",
+            "--name=clean_data_vae",
+            "--include_timestamp=False",
+            f"--config.steps={_models.deminf_train_steps}",
+            f"--config.save_freq={_models.deminf_train_save_freq}",
+            "--config.dataloader.datasets.clean_data.train_split=train_sel",
+            "--config.dataloader.datasets.clean_data.val_split=test_sel",
+        ],
+        cwd=_paths.deminf_root,
+        env=env,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"DemInf VAE training failed for task_id={task_id!r} (exit {proc.returncode})"
+        )
+
+    ckpt = _get_checkpoint_for_task(task_id)
+    if not ckpt:
+        raise RuntimeError(f"Checkpoint not found after training for task_id={task_id!r}")
+    return ckpt
+
+
+def _run_deminf_scoring(manifests: list, ckpts_by_task: dict[str, str]) -> None:
+    """Run deminf_score_episodes.py once per task_id using the given checkpoints.
+
+    Each run gets RDF_DEMINF_DATA → DEMINF_DATA/{task_id} and RDF_DEMINF_CKPT →
+    the resolved checkpoint for that task.  Per-task scores are merged into the
+    single shared scores file at paths_config.deminf_scores_file.
     """
     import json
     import subprocess
@@ -102,6 +186,7 @@ def _run_deminf_scoring(manifests: list) -> None:
             tmp_scores = f.name
         env = os.environ.copy()
         env["RDF_DEMINF_DATA"] = str(DEMINF_DATA / task_id)
+        env["RDF_DEMINF_CKPT"] = ckpts_by_task[task_id]
         env["RDF_DEMINF_SCORES"] = tmp_scores
         proc = subprocess.run(
             [_OPENX_PYTHON, str(_DEMINF_SCORE_SCRIPT)],
@@ -195,9 +280,17 @@ def _parse_metadata(episode_id: str) -> dict:
     meta = yaml.safe_load(meta_path.read_text())
     tasks = meta.get("tasks", [])
     task = tasks[0] if tasks else meta.get("task", "unknown")
+    task_id = meta.get("task_id")
+    if task_id is None:
+        print(
+            f"  WARNING: {episode_id}/metadata.yaml has no task_id field"
+            f" — using default_task_id={_pipeline.default_task_id!r}",
+            flush=True,
+        )
+        task_id = _pipeline.default_task_id
     return {
         "task": task,
-        "task_id": meta.get("task_id", _pipeline.default_task_id),
+        "task_id": task_id,
         "instruction": task,  # no instruction field in these files
         "embodiment": meta.get("robot_type", "unknown"),
         "robot_id": meta.get("robot_id", "unknown"),
@@ -351,9 +444,33 @@ def main():
         print(f"  Linked {added} new episodes under {DEMINF_DATA}/{{task_id}}/train/ ({n_total} total)")
     else:
         print(f"  All {n_total} episodes already present  task_ids={task_ids}")
+
+    # Resolve (or auto-train) the VAE checkpoint for each task_id
+    ckpts_by_task: dict[str, str] = {}
+    for task_id in task_ids:
+        ckpt = _get_checkpoint_for_task(task_id)
+        if ckpt:
+            print(f"  Checkpoint found for task_id={task_id!r}: {ckpt}")
+        else:
+            print(
+                f"  No checkpoint for task_id={task_id!r} — training VAE"
+                f" ({_models.deminf_train_episodes} episodes, {_models.deminf_train_steps} steps) …",
+                flush=True,
+            )
+            pass_ep_ids = [
+                r.episode_id
+                for task in all_tasks
+                for r in catalog.rows_for_task(task)
+                if r.robometer_pass and r.episode_id in {m.episode_id for m in manifests if m.task_id == task_id}
+            ]
+            t_train = time.monotonic()
+            ckpt = _train_deminf_for_task(task_id, pass_ep_ids)
+            print(f"  Training complete in {time.monotonic() - t_train:.1f}s  ckpt={ckpt}")
+        ckpts_by_task[task_id] = ckpt
+
     print(f"  Running deminf_score_episodes.py for task_ids={task_ids} (openx env) …", flush=True)
     t_deminf = time.monotonic()
-    _run_deminf_scoring(manifests)
+    _run_deminf_scoring(manifests, ckpts_by_task)
     elapsed_deminf = time.monotonic() - t_deminf
     print(f"  DemInf scoring complete in {elapsed_deminf:.1f}s\n")
 

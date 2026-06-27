@@ -50,14 +50,31 @@ tf.config.set_visible_devices([], "GPU")
 import quality_estimators
 
 _ckpts_dir = Path(_paths_cfg.deminf_ckpts_dir)
-CKPT = os.environ.get("RDF_DEMINF_CKPT") or (
-    str(sorted(_ckpts_dir.glob("*/1000"))[-1])
-    if list(_ckpts_dir.glob("*/1000"))
-    else ""
-)
-DATA_ROOT = Path(_paths_cfg.deminf_data_dir)
-SCORES_OUT = Path(_paths_cfg.deminf_scores_file)
-SPLIT = _models_cfg.deminf_split
+DATA_ROOT = Path(os.environ.get("RDF_DEMINF_DATA", _paths_cfg.deminf_data_dir))
+SCORES_OUT = Path(os.environ.get("RDF_DEMINF_SCORES", _paths_cfg.deminf_scores_file))
+SPLIT = os.environ.get("RDF_DEMINF_SPLIT", _models_cfg.deminf_split)
+
+# Checkpoint: explicit env var wins; otherwise scan ckpts_dir/{task_id}/*/step.
+# task_id is inferred from DATA_ROOT relative to deminf_data_dir.
+def _auto_detect_ckpt() -> str:
+    explicit = os.environ.get("RDF_DEMINF_CKPT")
+    if explicit:
+        return explicit
+    try:
+        task_id = DATA_ROOT.relative_to(_ckpts_dir.parent / "rdf_pipeline_deminf" / "deminf_data").parts[0]
+    except ValueError:
+        task_id = DATA_ROOT.name
+    task_ckpt_dir = _ckpts_dir / task_id
+    if not task_ckpt_dir.exists():
+        return ""
+    target_step = _models_cfg.deminf_train_steps
+    exact = sorted(task_ckpt_dir.glob(f"*/{target_step}"))
+    if exact:
+        return str(exact[-1])
+    all_steps = sorted(task_ckpt_dir.glob("*/[0-9]*"), key=lambda p: int(p.name))
+    return str(all_steps[-1]) if all_steps else ""
+
+CKPT = _auto_detect_ckpt()
 
 
 def main():
