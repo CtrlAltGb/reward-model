@@ -1,14 +1,15 @@
 """Robometer persistent worker — REAL-MODEL SEAM.
 
-Written by reading:
-  /data/robometer/robometer/evals/eval_server.py
-  /data/robometer/scripts/example_inference.py  (the HTTP client we reuse)
+Two implementations:
 
-Option A (server mode): eval_server.py runs as a sidecar, loads model once.
-This module is a thin HTTP client around example_inference.py::compute_rewards_per_frame().
+RobometerLocalWorker (preferred)
+    Loads the checkpoint in-process via load_model_from_hf, calls
+    compute_batch_outputs directly.  No server, no HTTP, no startup wait.
+    Mirrors scripts/example_inference_local.py.
 
-Must be imported/run inside the robometer uv env:
-  cd /data/robometer && uv run python -m rdf.models.robometer_worker
+RobometerWorker (legacy)
+    Thin HTTP client to a separately-started eval_server.py sidecar.
+    Kept for backwards compatibility / multi-GPU server use.
 
 DO NOT modify /data/robometer — only import from it.
 """
@@ -117,3 +118,105 @@ class RobometerWorker:
             return self.score_episode(tmp_path, instruction)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
+
+
+class RobometerLocalWorker:
+    """Loads Robometer checkpoint in-process — no FastAPI server required.
+
+    Mirrors scripts/example_inference_local.py but loads once and scores many.
+    Eliminates ~60s server startup vs RobometerWorker.
+    """
+
+    def __init__(
+        self,
+        model_path: str | None = None,
+        device: str | None = None,
+    ):
+        import torch
+        from robometer.data.dataset_types import ProgressSample, Trajectory
+        from robometer.evals.eval_server import compute_batch_outputs
+        from robometer.utils.save import load_model_from_hf
+        from robometer.utils.setup_utils import setup_batch_collator
+
+        self.model_version = _MODEL_VERSION
+        self._model_path = model_path or os.environ.get(
+            "RDF_ROBOMETER_MODEL_PATH",
+            str(_ROBOMETER_ROOT / "robometer" / "Robometer-4B"),
+        )
+        self._device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+        exp_config, tokenizer, processor, reward_model = load_model_from_hf(
+            model_path=self._model_path,
+            device=self._device,
+        )
+        reward_model.eval()
+
+        self._model = reward_model
+        self._tokenizer = tokenizer
+        self._batch_collator = setup_batch_collator(processor, tokenizer, exp_config, is_eval=True)
+        self._compute_batch_outputs = compute_batch_outputs
+        self._Trajectory = Trajectory
+        self._ProgressSample = ProgressSample
+
+        loss_config = getattr(exp_config, "loss", None)
+        self._is_discrete = (
+            getattr(loss_config, "progress_loss_type", "l2").lower() == "discrete"
+            if loss_config else False
+        )
+        self._num_bins = (
+            getattr(loss_config, "progress_discrete_bins", None)
+            or getattr(exp_config.model, "progress_discrete_bins", 10)
+        )
+
+    def score_episode_from_frames(self, frames: np.ndarray, instruction: str) -> RobometerScore:
+        import torch
+
+        T = int(frames.shape[0])
+        traj = self._Trajectory(
+            frames=frames,
+            frames_shape=tuple(frames.shape),
+            task=instruction,
+            id="0",
+            metadata={"subsequence_length": T},
+            video_embeddings=None,
+        )
+        sample = self._ProgressSample(trajectory=traj, sample_type="progress")
+        batch = self._batch_collator([sample])
+
+        progress_inputs = batch["progress_inputs"]
+        for key, value in progress_inputs.items():
+            if hasattr(value, "to"):
+                progress_inputs[key] = value.to(self._device)
+
+        with torch.no_grad():
+            results = self._compute_batch_outputs(
+                self._model,
+                self._tokenizer,
+                progress_inputs,
+                sample_type="progress",
+                is_discrete_mode=self._is_discrete,
+                num_bins=self._num_bins,
+            )
+
+        progress_pred = results.get("progress_pred", [])
+        progress_array = (
+            np.array(progress_pred[0], dtype=np.float32)
+            if progress_pred else np.array([], dtype=np.float32)
+        )
+        outputs_success = results.get("outputs_success", {}) or {}
+        success_probs = outputs_success.get("success_probs", [])
+        success_array = (
+            np.array(success_probs[0], dtype=np.float32)
+            if success_probs else np.array([], dtype=np.float32)
+        )
+
+        reward = float(np.mean(progress_array)) if progress_array.size else 0.0
+        success_pred = float(success_array[-1]) if success_array.size else (
+            float(progress_array[-1]) if progress_array.size else 0.0
+        )
+        return RobometerScore(
+            reward=round(reward, 6),
+            success_pred=round(success_pred, 6),
+            frames_used=T,
+            model_version=self.model_version,
+        )

@@ -31,7 +31,7 @@ from rdf.harness.queue import LocalQueue
 from rdf.harness.storage import ObjectStore
 from rdf.models.mock import MockDeminfModel, MockRobometerModel
 from rdf.schemas.models import CatalogRow, CohortMessage, EpisodeManifest, PipelineConfig
-from rdf.stage_a_robometer.worker import prefetch_episodes, run_worker as run_stage_a
+from rdf.stage_a_robometer.worker import stream_episodes, run_worker as run_stage_a
 from rdf.stage_b_deminf.infer_worker import run_infer_worker as run_stage_b
 from rdf.decision.decide import decide_all
 
@@ -182,83 +182,71 @@ def main():
         print(f"  (smoke-test mode: processing {max_a}/{len(manifests)} episodes)")
 
     _robometer_server_proc = None
-    prefetched = None
 
     if rdf_models == "mock":
         robometer_model = MockRobometerModel()
-    else:
-        import subprocess as _sp
-        import threading as _threading
-
-        _robometer_server_proc = _sp.Popen(
-            [
-                "/data/robometer/.venv/bin/python3",
-                "robometer/evals/eval_server.py",
-                "model_path=robometer/Robometer-4B",
-                "batch_size=16",
-                "num_gpus=1",
-                "server_port=8001",
-            ],
-            cwd="/data/robometer",
-            stdout=_sp.DEVNULL,
-            stderr=_sp.DEVNULL,
+        t_a = time.monotonic()
+        n_a = run_stage_a(
+            model=robometer_model,
+            queue=episode_queue,
+            store=store,
+            catalog=catalog,
+            robometer_threshold=robometer_threshold,
+            poll_wait=0,
+            max_episodes=max_a,
         )
+        elapsed_a = time.monotonic() - t_a
+    else:
+        import queue as _stdlib_queue
+        import threading as _threading
+        from rdf.models.robometer_worker import RobometerLocalWorker
 
-        # Phase 1: decode all episodes in parallel while the server loads.
-        # prefetch_episodes needs no GPU — safe to run before server is ready.
-        _prefetch_result: list = []
-        _prefetch_exc: list = []
+        # decoded_q: producer puts (msg, manifest, frames, err) as each episode
+        # finishes decoding; None sentinel signals end-of-stream to the consumer.
+        # maxsize=8 caps memory — GPU scores faster than the CPU decodes, so the
+        # queue usually drains before it fills.
+        decoded_q: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=8)
+        _producer_exc: list = []
 
-        def _run_prefetch():
+        def _run_producer():
             try:
-                result = prefetch_episodes(
+                stream_episodes(
                     queue=episode_queue,
                     store=store,
                     catalog=catalog,
                     model_version="Robometer-4B",
+                    decoded_q=decoded_q,
                     max_episodes=max_a,
                 )
-                _prefetch_result.append(result)
             except Exception as exc:
-                _prefetch_exc.append(exc)
+                _producer_exc.append(exc)
+                decoded_q.put(None)  # unblock consumer even on error
 
-        prefetch_thread = _threading.Thread(target=_run_prefetch, daemon=True)
-        prefetch_thread.start()
+        producer_thread = _threading.Thread(target=_run_producer, daemon=True)
+        producer_thread.start()
+        print("  Decoding episodes in background …", flush=True)
 
-        import requests as _req
-        print("  Waiting for Robometer server …", flush=True)
-        for _ in range(120):
-            try:
-                if _req.get("http://localhost:8001/health", timeout=5).status_code == 200:
-                    break
-            except Exception:
-                pass
-            time.sleep(5)
-        else:
-            _robometer_server_proc.kill()
-            raise RuntimeError("Robometer server did not start in 600s")
-        print("  Server ready.", flush=True)
+        t_model_start = time.monotonic()
+        robometer_model = RobometerLocalWorker()
+        model_load_s = time.monotonic() - t_model_start
+        print(f"  Model loaded in {model_load_s:.1f}s — scoring begins now", flush=True)
 
-        prefetch_thread.join()
-        if _prefetch_exc:
-            raise _prefetch_exc[0]
-        prefetched = _prefetch_result[0]
+        t_a = time.monotonic()
+        n_a = run_stage_a(
+            model=robometer_model,
+            queue=episode_queue,
+            store=store,
+            catalog=catalog,
+            robometer_threshold=robometer_threshold,
+            poll_wait=0,
+            max_episodes=max_a,
+            decoded_stream=decoded_q,
+        )
+        elapsed_a = time.monotonic() - t_a
 
-        from rdf.models.robometer_worker import RobometerWorker
-        robometer_model = RobometerWorker()
-
-    t_a = time.monotonic()
-    n_a = run_stage_a(
-        model=robometer_model,
-        queue=episode_queue,
-        store=store,
-        catalog=catalog,
-        robometer_threshold=robometer_threshold,
-        poll_wait=0,
-        max_episodes=max_a,
-        prefetched=prefetched,
-    )
-    elapsed_a = time.monotonic() - t_a
+        producer_thread.join()
+        if _producer_exc:
+            raise _producer_exc[0]
 
     # Report Stage A results — only count episodes that were actually scored
     all_tasks = list({m.task for m in manifests})
@@ -272,7 +260,8 @@ def main():
             else:
                 stage_a_drop += 1
     print(f"  Processed: {n_a}  Pass: {stage_a_pass}  Drop (gate): {stage_a_drop}")
-    print(f"  Time: {elapsed_a:.1f}s  ({elapsed_a/n_a*1000:.0f}ms/episode)\n")
+    ms_per = (elapsed_a / n_a * 1000) if n_a else 0
+    print(f"  Time: {elapsed_a:.1f}s  ({ms_per:.0f}ms/episode)\n")
 
     if _robometer_server_proc is not None:
         print("  Stopping Robometer server …", flush=True)
