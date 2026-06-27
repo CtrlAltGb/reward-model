@@ -121,3 +121,53 @@ class PipelineConfig(BaseModel):
     deminf_cohort_min: int = 50
     deminf_cohort_max: int = 300
     deminf_cohort_timeout_hours: float = 12.0
+    # Decision thresholds
+    robometer_threshold: float = 0.5
+    deminf_threshold: float = -10.0
+    # Versioning
+    vae_version: str = "v1"
+    reference_set_version: str = "v1"
+    # Default embodiment for Stage B
+    embodiment: str = "franka"
+
+
+class PathsConfig(BaseModel):
+    model_config = {"frozen": True}
+
+    # Input data
+    clean_data_dir: str = "/data/clean_data"
+    # Pipeline scratch / outputs
+    scratch_dir: str = "/data/reward_model_files/rdf_integration"
+    deminf_data_dir: str = "/data/reward_model_files/rdf_pipeline_deminf/deminf_data"
+    deminf_scores_file: str = "/data/reward_model_files/rdf_deminf_scores.json"
+    deminf_ckpts_dir: str = "/data/reward_model_files/rdf_deminf_ckpts"
+    # Local harness state dirs (SQLite catalog + queues)
+    local_catalog_dir: str = "/data/reward_model_files/rdf_integration/catalog"
+    local_queue_dir: str = "/data/reward_model_files/rdf_integration/queues"
+    # Python environments
+    openx_python: str = "/data/.conda/envs/openx/bin/python3"
+    # Upstream repos — import-only, never modify
+    robometer_root: str = "/data/robometer"
+    deminf_root: str = "/data/demonstration-information"
+    # Model checkpoints
+    robometer_model_path: str = "/data/robometer/robometer/Robometer-4B"
+
+
+class ModelsConfig(BaseModel):
+    model_config = {"frozen": True}
+
+    # Robometer — local worker
+    robometer_model_version: str = "Robometer-4B"
+    # Robometer — HTTP server (RobometerWorker only)
+    robometer_server_url: str = "http://localhost:8001"
+    robometer_server_timeout_s: float = 120.0
+    robometer_server_fps: float = 1.0
+    # Video preprocessing
+    video_target_fps: float = 2.0
+    video_target_size: int = 256
+    video_preprocess_workers: int = 8
+    decode_queue_maxsize: int = 8
+    # DemInf scoring subprocess
+    deminf_estimator: str = "ksg"
+    deminf_batch_size: int = 32
+    deminf_split: str = "train"

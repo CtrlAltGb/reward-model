@@ -1,0 +1,39 @@
+# Model and preprocessing settings.
+# Env var overrides: RDF_ROBOMETER_MODEL_VERSION, RDF_DEMINF_SPLIT.
+
+# ── Robometer — local in-process worker ───────────────────────────────────────
+
+# Model identifier stored in catalog rows and used for idempotency checks
+robometer_model_version: Robometer-4B
+
+# ── Robometer — HTTP server (RobometerWorker only, not used in default pipeline) ──
+
+robometer_server_url: http://localhost:8001
+robometer_server_timeout_s: 120.0
+# FPS at which frames are sampled from the video file path (server mode only)
+robometer_server_fps: 1.0
+
+# ── Video preprocessing ───────────────────────────────────────────────────────
+
+# Output frame rate after subsampling (frames per second)
+video_target_fps: 2.0
+
+# Output frame resolution (square crop + resize to this size in pixels)
+video_target_size: 256
+
+# ThreadPoolExecutor workers for parallel video decoding in Stage A
+video_preprocess_workers: 8
+
+# Max decoded episodes buffered in the streaming queue between producer and scorer
+decode_queue_maxsize: 8
+
+# ── DemInf scoring subprocess ─────────────────────────────────────────────────
+
+# KSG mutual-information estimator used by quality_estimators
+deminf_estimator: ksg
+
+# Batch size passed to get_dataset_and_score_fn
+deminf_batch_size: 32
+
+# Dataset split scored by deminf_score_episodes.py
+deminf_split: train

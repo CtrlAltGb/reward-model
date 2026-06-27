@@ -22,23 +22,30 @@ os.environ.setdefault("RDF_STORAGE", "local")
 
 import time
 import uuid
-import yaml
 from datetime import datetime, timezone
 
+import yaml
+
+from rdf.decision.decide import decide_all
 from rdf.harness.catalog import LocalCatalog
+from rdf.harness.config import get_models_config, get_paths_config, get_pipeline_config
 from rdf.harness.queue import LocalQueue
 from rdf.harness.storage import ObjectStore
-from rdf.schemas.models import CatalogRow, CohortMessage, EpisodeManifest, PipelineConfig
-from rdf.stage_a_robometer.worker import stream_episodes, run_worker as run_stage_a
+from rdf.schemas.models import CatalogRow, CohortMessage, EpisodeManifest
+from rdf.stage_a_robometer.worker import run_worker as run_stage_a
+from rdf.stage_a_robometer.worker import stream_episodes
 from rdf.stage_b_deminf.infer_worker import run_infer_worker as run_stage_b
-from rdf.decision.decide import decide_all
 
-CLEAN_DATA = Path("/data/clean_data")
-SCRATCH = Path("/data/reward_model_files/rdf_integration")
+_paths = get_paths_config()
+_pipeline = get_pipeline_config()
+_models = get_models_config()
+
+CLEAN_DATA = Path(_paths.clean_data_dir)
+SCRATCH = Path(_paths.scratch_dir)
 SCRATCH.mkdir(parents=True, exist_ok=True)
 
-DEMINF_DATA = Path(os.environ.get("RDF_DEMINF_DATA", "/data/reward_model_files/rdf_pipeline_deminf/deminf_data"))
-_OPENX_PYTHON = "/data/.conda/envs/openx/bin/python3"
+DEMINF_DATA = Path(_paths.deminf_data_dir)
+_OPENX_PYTHON = _paths.openx_python
 _DEMINF_SCORE_SCRIPT = Path(__file__).parent / "deminf_score_episodes.py"
 
 
@@ -71,24 +78,17 @@ def _setup_deminf_data(manifests: list) -> int:
     return added
 
 
-def _run_deminf_scoring(scores_out: str) -> None:
+def _run_deminf_scoring() -> None:
     """Run deminf_score_episodes.py in the openx conda env (blocking).
 
-    Uses DEMINF_DATA as the data root and writes scores to scores_out.
-    Checkpoint is auto-detected from /data/reward_model_files/rdf_deminf_ckpts/*/1000.
+    Paths and settings come from the shared config — no env var plumbing needed.
     Raises RuntimeError if the subprocess exits non-zero.
     """
     import subprocess
 
-    env = dict(os.environ)
-    env["RDF_DEMINF_DATA"] = str(DEMINF_DATA)
-    env["RDF_DEMINF_SCORES"] = str(scores_out)
-    env["RDF_DEMINF_SPLIT"] = "train"
-
     proc = subprocess.run(
         [_OPENX_PYTHON, str(_DEMINF_SCORE_SCRIPT)],
-        cwd="/data/demonstration-information",
-        env=env,
+        cwd=_paths.deminf_root,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"DemInf scoring subprocess failed (exit {proc.returncode})")
@@ -206,6 +206,9 @@ def main():
     episode_queue = LocalQueue("rdf-episodes", root=str(SCRATCH / "queues"))
     cohort_queue = LocalQueue("rdf-cohorts", root=str(SCRATCH / "queues"))
 
+    robometer_threshold = _pipeline.robometer_threshold
+    deminf_threshold = _pipeline.deminf_threshold
+
     # --- Ingestion: build manifests, seed catalog, enqueue ---
     print("[ Ingestion ]")
     instruction_override = os.environ.get("RDF_INSTRUCTION")
@@ -220,7 +223,7 @@ def main():
             task=m.task,
             embodiment=m.embodiment,
             robot_id=m.robot_id,
-            pipeline_mode="sequential",
+            pipeline_mode=_pipeline.mode,
             created_at=now,
             updated_at=now,
         ))
@@ -229,20 +232,19 @@ def main():
 
     # --- Stage A: Robometer scoring ---
     print("[ Stage A — Robometer ]")
-    robometer_threshold = float(os.environ.get("RDF_ROBOMETER_THRESHOLD", "0.5"))
     max_a = int(os.environ.get("RDF_MAX_EPISODES", len(manifests)))
     if max_a < len(manifests):
         print(f"  (smoke-test mode: processing {max_a}/{len(manifests)} episodes)")
 
     import queue as _stdlib_queue
     import threading as _threading
+
     from rdf.models.robometer_worker import RobometerLocalWorker
 
     # decoded_q: producer puts (msg, manifest, frames, err) as each episode
     # finishes decoding; None sentinel signals end-of-stream to the consumer.
-    # maxsize=8 caps memory — GPU scores faster than the CPU decodes, so the
-    # queue usually drains before it fills.
-    decoded_q: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=8)
+    # maxsize caps memory — GPU scores faster than the CPU decodes.
+    decoded_q: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=_models.decode_queue_maxsize)
     _producer_exc: list = []
 
     def _run_producer():
@@ -251,9 +253,10 @@ def main():
                 queue=episode_queue,
                 store=store,
                 catalog=catalog,
-                model_version="Robometer-4B",
+                model_version=_models.robometer_model_version,
                 decoded_q=decoded_q,
                 max_episodes=max_a,
+                n_preprocess_workers=_models.video_preprocess_workers,
             )
         except Exception as exc:
             _producer_exc.append(exc)
@@ -301,7 +304,6 @@ def main():
     print(f"  Time: {elapsed_a:.1f}s  ({ms_per:.0f}ms/episode)\n")
 
     # --- DemInf scoring (runs in openx env as subprocess) ---
-    deminf_scores_file = os.environ.get("RDF_DEMINF_SCORES", "/data/reward_model_files/rdf_deminf_scores.json")
     print("[ DemInf Scoring ]")
     added = _setup_deminf_data(manifests)
     n_train = len(list((DEMINF_DATA / "train").iterdir()))
@@ -311,30 +313,28 @@ def main():
         print(f"  All {n_train} episodes already present in {DEMINF_DATA}/train/")
     print("  Running deminf_score_episodes.py (openx env) …", flush=True)
     t_deminf = time.monotonic()
-    _run_deminf_scoring(deminf_scores_file)
+    _run_deminf_scoring()
     elapsed_deminf = time.monotonic() - t_deminf
     print(f"  DemInf scoring complete in {elapsed_deminf:.1f}s\n")
 
     # --- Cohort accumulation (sequential mode) ---
     print("[ Cohort Accumulation ]")
     from rdf.stage_b_deminf.accumulator import accumulate_sequential
-    pipeline_cfg = PipelineConfig()
     cohort_ids = accumulate_sequential(
         tasks=all_tasks,
         catalog=catalog,
         cohort_queue=cohort_queue,
-        pipeline_cfg=pipeline_cfg,
-        vae_version="v1",
-        reference_set_version="v1",
+        pipeline_cfg=_pipeline,
+        vae_version=_pipeline.vae_version,
+        reference_set_version=_pipeline.reference_set_version,
     )
     print(f"  Tasks: {all_tasks}")
     print(f"  Cohorts emitted: {len(cohort_ids)}\n")
 
     # --- Stage B: DemInf lookup ---
-    print(f"[ Stage B — DemInf (scores from {deminf_scores_file}) ]")
+    print(f"[ Stage B — DemInf (scores from {_paths.deminf_scores_file}) ]")
     from rdf.models.deminf_worker import DeminfWorker
-    deminf_model = DeminfWorker(scores_file=deminf_scores_file)
-    deminf_threshold = float(os.environ.get("RDF_DEMINF_THRESHOLD", "-10.0"))
+    deminf_model = DeminfWorker()
 
     t_b = time.monotonic()
     n_b = run_stage_b(

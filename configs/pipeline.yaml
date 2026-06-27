@@ -1,0 +1,41 @@
+# Pipeline behaviour — thresholds, cohort sizing, versioning, mode.
+# Env var overrides: RDF_ROBOMETER_THRESHOLD, RDF_DEMINF_THRESHOLD.
+
+# ── Decision thresholds ───────────────────────────────────────────────────────
+
+# Stage A gate: episodes with robometer_success_pred < this are dropped
+robometer_threshold: 0.5
+
+# Stage B trim: episodes with deminf_score < this are dropped
+# Typical range: -20 (permissive) to 0 (strict). Default -10 keeps most passes.
+deminf_threshold: -10.0
+
+# ── Versioning ────────────────────────────────────────────────────────────────
+
+vae_version: v1
+reference_set_version: v1
+
+# ── Embodiment ────────────────────────────────────────────────────────────────
+
+# Default embodiment used by Stage B to look up MCAP topic names
+embodiment: franka
+
+# ── Pipeline mode ─────────────────────────────────────────────────────────────
+
+# sequential: accumulate all Stage A results, then run one DemInf cohort per task
+# parallel: emit cohorts incrementally as deminf_cohort_min episodes accumulate
+mode: sequential
+
+# ── Cohort accumulation (parallel mode only) ──────────────────────────────────
+
+deminf_cohort_min: 50
+deminf_cohort_max: 300
+deminf_cohort_timeout_hours: 12.0
+
+# ── AWS resource names (cloud deployments only) ───────────────────────────────
+
+raw_bucket: rdf-raw
+clean_bucket: rdf-clean
+registry_bucket: rdf-registry
+episode_queue_name: rdf-episodes
+cohort_queue_name: rdf-cohorts

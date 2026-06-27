@@ -1,0 +1,46 @@
+# Filesystem paths for the RDF pipeline.
+# Edit this file to relocate data, outputs, checkpoints, or environments.
+# All paths are absolute. Env var overrides: RDF_DEMINF_DATA, RDF_DEMINF_SCORES.
+
+# ── Input data ────────────────────────────────────────────────────────────────
+
+# Raw episodes directory — subdirs named by episode_id, each containing
+# cam_head.mp4, cam_wrist.mp4, <episode_id>.mcap, metadata.yaml
+clean_data_dir: /data/clean_data
+
+# ── Pipeline scratch / outputs ────────────────────────────────────────────────
+
+# Root scratch directory — reset a run with: rm -rf <scratch_dir>
+scratch_dir: /data/reward_model_files/rdf_integration
+
+# Episode symlinks + _cached.npz files fed to the DemInf scorer
+deminf_data_dir: /data/reward_model_files/rdf_pipeline_deminf/deminf_data
+
+# Per-episode DemInf scores written by deminf_score_episodes.py (openx env)
+deminf_scores_file: /data/reward_model_files/rdf_deminf_scores.json
+
+# Directory of pre-trained VAE checkpoints (subdirs named by run, step subdir e.g. .../1000)
+deminf_ckpts_dir: /data/reward_model_files/rdf_deminf_ckpts
+
+# ── Local harness state (SQLite) ──────────────────────────────────────────────
+
+# SQLite catalog (catalog.db lives here)
+local_catalog_dir: /data/reward_model_files/rdf_integration/catalog
+
+# SQLite-backed episode and cohort queues
+local_queue_dir: /data/reward_model_files/rdf_integration/queues
+
+# ── Python environments ───────────────────────────────────────────────────────
+
+# openx conda env — used for DemInf scoring subprocess (JAX / flax / TF)
+openx_python: /data/.conda/envs/openx/bin/python3
+
+# ── Upstream repos — import-only, never modify ───────────────────────────────
+
+robometer_root: /data/robometer
+deminf_root: /data/demonstration-information
+
+# ── Model checkpoints ─────────────────────────────────────────────────────────
+
+# Robometer VLM checkpoint loaded in-process by RobometerLocalWorker
+robometer_model_path: /data/robometer/robometer/Robometer-4B

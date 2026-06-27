@@ -1,7 +1,7 @@
 """
 BetaVAE trained on Robometer-filtered clean_data episodes (Franka MCAP format).
 
-Data layout expected at /tmp/rdf_pipeline_deminf/deminf_data/:
+Data layout expected at configs/paths.yaml::deminf_data_dir:
     train/episode_XXXX/{episode_XXXX.mcap, cam_head.mp4}
     test/episode_XXXX/{episode_XXXX.mcap, cam_head.mp4}
 
@@ -17,6 +17,8 @@ config_str options:
     sa  — joint state+action  (z_dim=18)
 """
 
+import os
+
 import optax
 import tensorflow as tf
 from ml_collections import ConfigDict
@@ -28,7 +30,7 @@ from openx.networks.components.mlp import MLP
 from openx.networks.core import Concatenate, MultiDecoder, MultiEncoder
 from openx.utils.spec import ModuleSpec
 
-DEMINF_DATA = "/tmp/rdf_pipeline_deminf/deminf_data"
+DEMINF_DATA = os.environ.get("RDF_DEMINF_DATA", "/data/reward_model_files/rdf_pipeline_deminf/deminf_data")
 
 
 def get_config(config_str: str = "sa"):

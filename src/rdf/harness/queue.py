@@ -42,7 +42,13 @@ class LocalQueue(WorkQueue):
     """SQLite-backed queue for local/test use."""
 
     def __init__(self, name: str, root: str | None = None):
-        root_path = Path(root or os.environ.get("RDF_LOCAL_QUEUE_PATH", "/tmp/rdf/queues"))
+        if root is None:
+            try:
+                from rdf.harness.config import get_paths_config
+                root = get_paths_config().local_queue_dir
+            except Exception:
+                root = os.environ.get("RDF_LOCAL_QUEUE_PATH", "/tmp/rdf/queues")
+        root_path = Path(root)
         root_path.mkdir(parents=True, exist_ok=True)
         self.db_path = root_path / f"{name}.db"
         self.dlq_db_path = root_path / f"{name}-dlq.db"

@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 
 from rdf.harness.catalog import Catalog, get_catalog
-from rdf.harness.config import get_embodiment_config
+from rdf.harness.config import get_embodiment_config, get_pipeline_config
 from rdf.harness.idempotency import already_scored_deminf
 from rdf.harness.logging import bind_cohort, clear_context, configure_logging, get_logger
 from rdf.harness.mcap_extract import SyntheticMcapReader, extract_state_action
@@ -42,10 +42,13 @@ def run_infer_worker(
     deminf_threshold: float = 0.0,
     poll_wait: int = 5,
     max_cohorts: int | None = None,
-    embodiment: str = "franka",
+    embodiment: str | None = None,
 ) -> int:
     """Main DemInf inference worker loop. Returns number of cohorts processed."""
     configure_logging()
+
+    if embodiment is None:
+        embodiment = get_pipeline_config().embodiment
 
     queue = queue or get_queue("rdf-cohorts")
     store = store or get_object_store()

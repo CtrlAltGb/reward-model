@@ -11,10 +11,10 @@ Run with:
         /data/reward_model/scripts/deminf_score_episodes.py
 
 Env vars:
-    RDF_DEMINF_CKPT      path to checkpoint step dir (e.g. .../1000)
-    RDF_DEMINF_DATA      data root (default: /data/reward_model_files/rdf_pipeline_deminf/deminf_data)
-    RDF_DEMINF_SCORES    output JSON path (default: /data/reward_model_files/rdf_deminf_scores.json)
-    RDF_DEMINF_SPLIT     dataset split to score (default: train)
+    RDF_DEMINF_CKPT    path to checkpoint step dir (e.g. .../1000); overrides auto-detect
+    RDF_DEMINF_DATA    override configs/paths.yaml::deminf_data_dir
+    RDF_DEMINF_SCORES  override configs/paths.yaml::deminf_scores_file
+    RDF_DEMINF_SPLIT   override configs/models.yaml::deminf_split
 """
 from __future__ import annotations
 
@@ -26,8 +26,18 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-sys.path.insert(0, "/data/demonstration-information")
-sys.path.insert(0, "/data/demonstration-information/scripts/quality")
+# Make rdf importable so we can use the shared config system
+_RDF_SRC = Path(__file__).parent.parent / "src"
+if str(_RDF_SRC) not in sys.path:
+    sys.path.insert(0, str(_RDF_SRC))
+
+from rdf.harness.config import get_models_config, get_paths_config  # noqa: E402
+
+_paths_cfg = get_paths_config()
+_models_cfg = get_models_config()
+
+sys.path.insert(0, _paths_cfg.deminf_root)
+sys.path.insert(0, str(Path(_paths_cfg.deminf_root) / "scripts" / "quality"))
 
 import jax
 import jax.numpy as jnp
@@ -39,15 +49,15 @@ tf.config.set_visible_devices([], "GPU")
 
 import quality_estimators
 
-CKPT = os.environ.get(
-    "RDF_DEMINF_CKPT",
-    sorted(Path("/data/reward_model_files/rdf_deminf_ckpts").glob("*/1000"))[-1]
-    if list(Path("/data/reward_model_files/rdf_deminf_ckpts").glob("*/1000"))
-    else "",
+_ckpts_dir = Path(_paths_cfg.deminf_ckpts_dir)
+CKPT = os.environ.get("RDF_DEMINF_CKPT") or (
+    str(sorted(_ckpts_dir.glob("*/1000"))[-1])
+    if list(_ckpts_dir.glob("*/1000"))
+    else ""
 )
-DATA_ROOT = Path(os.environ.get("RDF_DEMINF_DATA", "/data/reward_model_files/rdf_pipeline_deminf/deminf_data"))
-SCORES_OUT = Path(os.environ.get("RDF_DEMINF_SCORES", "/data/reward_model_files/rdf_deminf_scores.json"))
-SPLIT = os.environ.get("RDF_DEMINF_SPLIT", "train")
+DATA_ROOT = Path(_paths_cfg.deminf_data_dir)
+SCORES_OUT = Path(_paths_cfg.deminf_scores_file)
+SPLIT = _models_cfg.deminf_split
 
 
 def main():
@@ -67,8 +77,8 @@ def main():
     # ksg_estimator computes density-based score in joint latent space.
     print("Loading checkpoint (once) …", flush=True)
     ds, pred_fn, dataset_ids = quality_estimators.get_dataset_and_score_fn(
-        estimator="ksg",
-        batch_size=32,
+        estimator=_models_cfg.deminf_estimator,
+        batch_size=_models_cfg.deminf_batch_size,
         obs_ckpt=str(CKPT),
         action_ckpt=str(CKPT),
         split=SPLIT,

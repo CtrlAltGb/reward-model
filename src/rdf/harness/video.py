@@ -14,8 +14,17 @@ import io
 
 import numpy as np
 
-_TARGET_FPS = 2.0
-_TARGET_SIZE = 256
+
+def _video_defaults() -> tuple[float, int]:
+    try:
+        from rdf.harness.config import get_models_config
+        cfg = get_models_config()
+        return cfg.video_target_fps, cfg.video_target_size
+    except Exception:
+        return 2.0, 256
+
+
+_TARGET_FPS, _TARGET_SIZE = _video_defaults()
 
 
 def _center_crop_square(frame: np.ndarray) -> np.ndarray:

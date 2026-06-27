@@ -15,16 +15,12 @@ DO NOT modify /data/demonstration-information — only import from it.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import numpy as np
 
+from rdf.harness.config import get_paths_config
 from rdf.models.base import DeminfModel
-
-_DEFAULT_SCORES_FILE = os.environ.get(
-    "RDF_DEMINF_SCORES", "/tmp/rdf_deminf_scores.json"
-)
 
 
 class DeminfWorker:
@@ -35,7 +31,7 @@ class DeminfWorker:
     """
 
     def __init__(self, scores_file: str | None = None):
-        self.scores_file = Path(scores_file or _DEFAULT_SCORES_FILE)
+        self.scores_file = Path(scores_file or get_paths_config().deminf_scores_file)
         self._scores: dict[str, float] = {}
         self._load()
 

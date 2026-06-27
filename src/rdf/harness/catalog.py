@@ -40,7 +40,13 @@ class LocalCatalog(Catalog):
     """SQLite-backed catalog for local/test use."""
 
     def __init__(self, root: str | None = None):
-        root_path = Path(root or os.environ.get("RDF_LOCAL_CATALOG_PATH", "/tmp/rdf/catalog"))
+        if root is None:
+            try:
+                from rdf.harness.config import get_paths_config
+                root = get_paths_config().local_catalog_dir
+            except Exception:
+                root = os.environ.get("RDF_LOCAL_CATALOG_PATH", "/tmp/rdf/catalog")
+        root_path = Path(root)
         root_path.mkdir(parents=True, exist_ok=True)
         self.db_path = root_path / "catalog.db"
         self._init_db()

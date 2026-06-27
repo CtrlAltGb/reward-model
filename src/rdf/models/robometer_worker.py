@@ -16,23 +16,26 @@ DO NOT modify /data/robometer — only import from it.
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
+from rdf.harness.config import get_models_config, get_paths_config
 from rdf.models.base import RobometerModel, RobometerScore
 
-# Add /data/robometer to path so we can import robometer scripts directly.
-_ROBOMETER_ROOT = Path("/data/robometer")
+_paths_cfg = get_paths_config()
+_models_cfg = get_models_config()
+
+# Add robometer repo to path so we can import robometer scripts directly.
+_ROBOMETER_ROOT = Path(_paths_cfg.robometer_root)
 if str(_ROBOMETER_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROBOMETER_ROOT))
 if str(_ROBOMETER_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(_ROBOMETER_ROOT / "scripts"))
 
-_MODEL_VERSION = os.environ.get("RDF_ROBOMETER_MODEL_VERSION", "Robometer-4B")
+_MODEL_VERSION = _models_cfg.robometer_model_version
 
 
 class RobometerWorker:
@@ -45,14 +48,12 @@ class RobometerWorker:
     def __init__(
         self,
         server_url: str | None = None,
-        fps: float = 1.0,
-        timeout_s: float = 120.0,
+        fps: float | None = None,
+        timeout_s: float | None = None,
     ):
-        self.server_url = server_url or os.environ.get(
-            "RDF_ROBOMETER_SERVER_URL", "http://localhost:8001"
-        )
-        self.fps = fps
-        self.timeout_s = timeout_s
+        self.server_url = server_url or _models_cfg.robometer_server_url
+        self.fps = fps if fps is not None else _models_cfg.robometer_server_fps
+        self.timeout_s = timeout_s if timeout_s is not None else _models_cfg.robometer_server_timeout_s
         self.model_version = _MODEL_VERSION
 
         # Lazy import — only works inside robometer uv env
@@ -139,10 +140,7 @@ class RobometerLocalWorker:
         from robometer.utils.setup_utils import setup_batch_collator
 
         self.model_version = _MODEL_VERSION
-        self._model_path = model_path or os.environ.get(
-            "RDF_ROBOMETER_MODEL_PATH",
-            str(_ROBOMETER_ROOT / "robometer" / "Robometer-4B"),
-        )
+        self._model_path = model_path or _paths_cfg.robometer_model_path
         self._device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
         exp_config, tokenizer, processor, reward_model = load_model_from_hf(
