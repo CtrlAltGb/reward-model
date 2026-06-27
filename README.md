@@ -278,7 +278,8 @@ scripts/
 | Architecture | Joint state+action BetaVAE, `z_dim=18`, `beta=0.05`, MLP encoder/decoder |
 | Scoring | kSG mutual-information estimator in joint latent space |
 | Input | Proprioceptive state + action sequences from MCAP (no images) |
-| Active checkpoint | `/data/reward_model_files/rdf_deminf_ckpts/clean_data_vae_20260626_181842/1000` |
+| Checkpoint layout | `rdf_deminf_ckpts/{task_id}/clean_data_vae/{step}/` — auto-trained if absent |
+| Active checkpoint | `/data/reward_model_files/rdf_deminf_ckpts/001/clean_data_vae/5000` |
 | Throughput | ~130ms/episode (cached `.npz`), ~3s/episode (fresh MCAP parse + JAX JIT) |
 
 ---
@@ -286,12 +287,15 @@ scripts/
 ## Pipeline data locations
 
 ```
-/data/clean_data/                          raw input episodes
+/data/clean_data/                                   raw input episodes
 /data/reward_model_files/
   rdf_integration/
-    catalog/catalog.db                     SQLite catalog (CatalogRow per episode)
-    queues/                                SQLite episode + cohort queues
-  rdf_pipeline_deminf/deminf_data/train/  episode symlinks + _cached.npz files
-  rdf_deminf_scores.json                  per-episode DemInf scores (written each run)
-  rdf_deminf_ckpts/                        pre-trained VAE checkpoints
+    catalog/catalog.db                              SQLite catalog (CatalogRow per episode)
+    queues/                                         SQLite episode + cohort queues
+  rdf_pipeline_deminf/deminf_data/
+    {task_id}/train/{episode_id}/                   episode symlinks (Stage-A-pass only)
+    {task_id}/train_sel/                            training subset (up to 50 episodes)
+    {task_id}/test_sel/                             val subset (first 5 of train_sel)
+  rdf_deminf_scores.json                            per-episode DemInf scores (written each run)
+  rdf_deminf_ckpts/{task_id}/clean_data_vae/{step}/ VAE checkpoint per task_id
 ```
