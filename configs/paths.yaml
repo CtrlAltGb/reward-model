@@ -42,5 +42,12 @@ deminf_root: /data/demonstration-information
 
 # ── Model checkpoints ─────────────────────────────────────────────────────────
 
-# Robometer VLM checkpoint loaded in-process by RobometerLocalWorker
+# Robometer VLM checkpoint loaded in-process by RobometerLocalWorker.
+# On first setup, download with:
+#   HF_HOME=/data/.hf_cache python3 -c "from huggingface_hub import snapshot_download; \
+#     snapshot_download('aliangdw/Robometer-4B', local_dir='/data/robometer/robometer/Robometer-4B')"
 robometer_model_path: /data/robometer/robometer/Robometer-4B
+
+# HuggingFace cache root — set HF_HOME to this before running any HF downloads
+# so all model files land in a known, persistent location.
+hf_home: /data/.hf_cache

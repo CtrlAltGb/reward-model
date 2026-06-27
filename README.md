@@ -102,7 +102,25 @@ Verify:
 /data/.conda/envs/openx/bin/pip install -e /data/reward_model
 ```
 
-### 5 — Log in to Weights & Biases (required for VAE auto-training)
+### 5 — Download the Robometer-4B checkpoint
+
+The pipeline loads the Robometer VLM from the local path in `configs/paths.yaml::robometer_model_path`
+(`/data/robometer/robometer/Robometer-4B` by default). Download it once with:
+
+```bash
+HF_HOME=/data/.hf_cache /data/robometer/.venv/bin/python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    'aliangdw/Robometer-4B',
+    local_dir='/data/robometer/robometer/Robometer-4B',
+)
+"
+```
+
+> Set `HF_HOME=/data/.hf_cache` (or update `configs/paths.yaml::hf_home`) to keep all
+> HuggingFace downloads in a persistent, known location instead of `~/.cache/huggingface`.
+
+### 6 — Log in to Weights & Biases (required for VAE auto-training)
 
 The pipeline auto-trains a DemInf VAE when no checkpoint exists for a task_id.
 The training script uses WandB for logging — you must be logged in once per machine:

@@ -154,6 +154,8 @@ class PathsConfig(BaseModel):
     deminf_root: str = "/data/demonstration-information"
     # Model checkpoints
     robometer_model_path: str = "/data/robometer/robometer/Robometer-4B"
+    # HuggingFace cache root — set HF_HOME to this to keep all HF downloads in one place
+    hf_home: str = "/data/.hf_cache"
 
 
 class ModelsConfig(BaseModel):
