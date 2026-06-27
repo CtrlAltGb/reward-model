@@ -79,11 +79,7 @@ def preprocess_video(
 
 
 def extract_frames(mp4_bytes: bytes, n_frames: int = 8) -> np.ndarray:
-    """Extract n_frames evenly-spaced frames, with preprocessing applied.
-
-    This is the legacy entry point used by tests and mock paths.
-    For the real pipeline, prefer preprocess_video() directly.
-    """
+    """Extract n_frames evenly-spaced frames, with preprocessing applied."""
     frames = preprocess_video(mp4_bytes)
     if len(frames) == 0:
         return np.zeros((n_frames, _TARGET_SIZE, _TARGET_SIZE, 3), dtype=np.uint8)

@@ -6,7 +6,6 @@ Loop: poll cohort queue → encode episodes → score → write catalog → dele
 
 from __future__ import annotations
 
-import os
 import signal
 import time
 from datetime import datetime, timezone
@@ -30,10 +29,6 @@ def _get_model(
     action_ckpt: str | None = None,
     reference_latents_path: str | None = None,
 ) -> DeminfModel:
-    backend = os.environ.get("RDF_MODELS", "mock")
-    if backend == "mock":
-        from rdf.models.mock import MockDeminfModel
-        return MockDeminfModel()
     from rdf.models.deminf_worker import DeminfWorker
     return DeminfWorker()
 
@@ -69,7 +64,7 @@ def run_infer_worker(
     signal.signal(signal.SIGTERM, _stop)
 
     embodiment_cfg = get_embodiment_config(embodiment)
-    mcap_reader = SyntheticMcapReader() if os.environ.get("RDF_MODELS", "mock") == "mock" else None
+    mcap_reader = None
 
     processed = 0
     logger.info("Stage B DemInf inference worker started")
@@ -96,27 +91,24 @@ def run_infer_worker(
 
         # Load model if VAE version changed — skip if a model was already injected
         if _model is None or (cohort.vae_version != _current_vae_version and model is None):
-            if os.environ.get("RDF_MODELS", "mock") != "mock":
-                artifact = registry.load(cohort.task, cohort.vae_version)
-                _model = _get_model(
-                    obs_ckpt=artifact.obs_ckpt,
-                    action_ckpt=artifact.action_ckpt,
-                )
-                # Attach reference latents directly
-                import io
-                import numpy as np
-                buf = io.BytesIO()
-                np.savez(buf, obs_latents=artifact.reference_latents_obs, action_latents=artifact.reference_latents_action)
-                buf.seek(0)
-                import tempfile, pathlib
-                with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
-                    f.write(buf.getvalue())
-                    ref_path = f.name
-                if hasattr(_model, '_load_reference_latents'):
-                    _model.reference_latents_path = ref_path
-                    _model._load_reference_latents()
-            else:
-                _model = _get_model()
+            artifact = registry.load(cohort.task, cohort.vae_version)
+            _model = _get_model(
+                obs_ckpt=artifact.obs_ckpt,
+                action_ckpt=artifact.action_ckpt,
+            )
+            # Attach reference latents directly
+            import io
+            import numpy as np
+            buf = io.BytesIO()
+            np.savez(buf, obs_latents=artifact.reference_latents_obs, action_latents=artifact.reference_latents_action)
+            buf.seek(0)
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+                f.write(buf.getvalue())
+                ref_path = f.name
+            if hasattr(_model, '_load_reference_latents'):
+                _model.reference_latents_path = ref_path
+                _model._load_reference_latents()
         _current_vae_version = cohort.vae_version
 
         try:

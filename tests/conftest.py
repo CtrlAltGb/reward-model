@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import os
-import tempfile
 
 import pytest
 
-os.environ.setdefault("RDF_MODELS", "mock")
 os.environ.setdefault("RDF_STORAGE", "local")
 os.environ.setdefault("RDF_QUEUE", "local")
 os.environ.setdefault("RDF_CATALOG", "local")
@@ -40,17 +38,3 @@ def cohort_queue(tmp_path):
 def local_catalog(tmp_path):
     from rdf.harness.catalog import LocalCatalog
     return LocalCatalog(root=str(tmp_path / "catalog"))
-
-
-@pytest.fixture
-def mock_robometer():
-    from rdf.models.mock import MockRobometerModel, reset_init_call_count
-    reset_init_call_count()
-    return MockRobometerModel(seed=42)
-
-
-@pytest.fixture
-def mock_deminf():
-    from rdf.models.mock import MockDeminfModel, reset_init_call_count
-    reset_init_call_count()
-    return MockDeminfModel(seed=42)

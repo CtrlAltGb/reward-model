@@ -1,12 +1,13 @@
 """End-to-end pipeline runner against /data/clean_data/.
 
-Runs all 177 episodes through Stage A (Robometer, mock) → cohort accumulation
-→ Stage B (DemInf, mock) → decision, using a store adapter that reads directly
-from /data/clean_data/ without copying any files.
+Runs all episodes through Stage A (Robometer) → DemInf scoring → cohort
+accumulation → Stage B (DemInf lookup) → decision, using a store adapter
+that reads directly from /data/clean_data/ without copying any files.
 
 Usage:
     cd /data/reward_model
-    RDF_MODELS=mock python scripts/run_local_pipeline.py
+    RDF_DEMINF_SCORES=/tmp/rdf_deminf_scores.json \\
+        /data/robometer/.venv/bin/python3 -u scripts/run_local_pipeline.py
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from pathlib import Path
 # --- make rdf importable without installing ---
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-os.environ.setdefault("RDF_MODELS", "mock")
 os.environ.setdefault("RDF_STORAGE", "local")
 
 import time
@@ -29,7 +29,6 @@ from datetime import datetime, timezone
 from rdf.harness.catalog import LocalCatalog
 from rdf.harness.queue import LocalQueue
 from rdf.harness.storage import ObjectStore
-from rdf.models.mock import MockDeminfModel, MockRobometerModel
 from rdf.schemas.models import CatalogRow, CohortMessage, EpisodeManifest, PipelineConfig
 from rdf.stage_a_robometer.worker import stream_episodes, run_worker as run_stage_a
 from rdf.stage_b_deminf.infer_worker import run_infer_worker as run_stage_b
@@ -230,79 +229,62 @@ def main():
     print(f"  Seeded catalog and enqueued {len(manifests)} episodes\n")
 
     # --- Stage A: Robometer scoring ---
-    rdf_models = os.environ.get("RDF_MODELS", "mock")
-    print(f"[ Stage A — Robometer ({rdf_models}) ]")
+    print("[ Stage A — Robometer ]")
     robometer_threshold = float(os.environ.get("RDF_ROBOMETER_THRESHOLD", "0.5"))
     max_a = int(os.environ.get("RDF_MAX_EPISODES", len(manifests)))
     if max_a < len(manifests):
         print(f"  (smoke-test mode: processing {max_a}/{len(manifests)} episodes)")
 
-    _robometer_server_proc = None
+    import queue as _stdlib_queue
+    import threading as _threading
+    from rdf.models.robometer_worker import RobometerLocalWorker
 
-    if rdf_models == "mock":
-        robometer_model = MockRobometerModel()
-        t_a = time.monotonic()
-        n_a = run_stage_a(
-            model=robometer_model,
-            queue=episode_queue,
-            store=store,
-            catalog=catalog,
-            robometer_threshold=robometer_threshold,
-            poll_wait=0,
-            max_episodes=max_a,
-        )
-        elapsed_a = time.monotonic() - t_a
-    else:
-        import queue as _stdlib_queue
-        import threading as _threading
-        from rdf.models.robometer_worker import RobometerLocalWorker
+    # decoded_q: producer puts (msg, manifest, frames, err) as each episode
+    # finishes decoding; None sentinel signals end-of-stream to the consumer.
+    # maxsize=8 caps memory — GPU scores faster than the CPU decodes, so the
+    # queue usually drains before it fills.
+    decoded_q: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=8)
+    _producer_exc: list = []
 
-        # decoded_q: producer puts (msg, manifest, frames, err) as each episode
-        # finishes decoding; None sentinel signals end-of-stream to the consumer.
-        # maxsize=8 caps memory — GPU scores faster than the CPU decodes, so the
-        # queue usually drains before it fills.
-        decoded_q: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=8)
-        _producer_exc: list = []
+    def _run_producer():
+        try:
+            stream_episodes(
+                queue=episode_queue,
+                store=store,
+                catalog=catalog,
+                model_version="Robometer-4B",
+                decoded_q=decoded_q,
+                max_episodes=max_a,
+            )
+        except Exception as exc:
+            _producer_exc.append(exc)
+            decoded_q.put(None)  # unblock consumer even on error
 
-        def _run_producer():
-            try:
-                stream_episodes(
-                    queue=episode_queue,
-                    store=store,
-                    catalog=catalog,
-                    model_version="Robometer-4B",
-                    decoded_q=decoded_q,
-                    max_episodes=max_a,
-                )
-            except Exception as exc:
-                _producer_exc.append(exc)
-                decoded_q.put(None)  # unblock consumer even on error
+    producer_thread = _threading.Thread(target=_run_producer, daemon=True)
+    producer_thread.start()
+    print("  Decoding episodes in background …", flush=True)
 
-        producer_thread = _threading.Thread(target=_run_producer, daemon=True)
-        producer_thread.start()
-        print("  Decoding episodes in background …", flush=True)
+    t_model_start = time.monotonic()
+    robometer_model = RobometerLocalWorker()
+    model_load_s = time.monotonic() - t_model_start
+    print(f"  Model loaded in {model_load_s:.1f}s — scoring begins now", flush=True)
 
-        t_model_start = time.monotonic()
-        robometer_model = RobometerLocalWorker()
-        model_load_s = time.monotonic() - t_model_start
-        print(f"  Model loaded in {model_load_s:.1f}s — scoring begins now", flush=True)
+    t_a = time.monotonic()
+    n_a = run_stage_a(
+        model=robometer_model,
+        queue=episode_queue,
+        store=store,
+        catalog=catalog,
+        robometer_threshold=robometer_threshold,
+        poll_wait=0,
+        max_episodes=max_a,
+        decoded_stream=decoded_q,
+    )
+    elapsed_a = time.monotonic() - t_a
 
-        t_a = time.monotonic()
-        n_a = run_stage_a(
-            model=robometer_model,
-            queue=episode_queue,
-            store=store,
-            catalog=catalog,
-            robometer_threshold=robometer_threshold,
-            poll_wait=0,
-            max_episodes=max_a,
-            decoded_stream=decoded_q,
-        )
-        elapsed_a = time.monotonic() - t_a
-
-        producer_thread.join()
-        if _producer_exc:
-            raise _producer_exc[0]
+    producer_thread.join()
+    if _producer_exc:
+        raise _producer_exc[0]
 
     # Report Stage A results — only count episodes that were actually scored
     all_tasks = list({m.task for m in manifests})
@@ -319,21 +301,20 @@ def main():
     ms_per = (elapsed_a / n_a * 1000) if n_a else 0
     print(f"  Time: {elapsed_a:.1f}s  ({ms_per:.0f}ms/episode)\n")
 
-    # --- DemInf scoring (real mode only, runs in openx env as subprocess) ---
+    # --- DemInf scoring (runs in openx env as subprocess) ---
     deminf_scores_file = os.environ.get("RDF_DEMINF_SCORES", "/tmp/rdf_deminf_scores.json")
-    if rdf_models == "real":
-        print("[ DemInf Scoring ]")
-        added = _setup_deminf_data(manifests)
-        n_train = len(list((DEMINF_DATA / "train").iterdir()))
-        if added:
-            print(f"  Linked {added} new episodes → {DEMINF_DATA}/train/ ({n_train} total)")
-        else:
-            print(f"  All {n_train} episodes already present in {DEMINF_DATA}/train/")
-        print("  Running deminf_score_episodes.py (openx env) …", flush=True)
-        t_deminf = time.monotonic()
-        _run_deminf_scoring(deminf_scores_file)
-        elapsed_deminf = time.monotonic() - t_deminf
-        print(f"  DemInf scoring complete in {elapsed_deminf:.1f}s\n")
+    print("[ DemInf Scoring ]")
+    added = _setup_deminf_data(manifests)
+    n_train = len(list((DEMINF_DATA / "train").iterdir()))
+    if added:
+        print(f"  Linked {added} new episodes → {DEMINF_DATA}/train/ ({n_train} total)")
+    else:
+        print(f"  All {n_train} episodes already present in {DEMINF_DATA}/train/")
+    print("  Running deminf_score_episodes.py (openx env) …", flush=True)
+    t_deminf = time.monotonic()
+    _run_deminf_scoring(deminf_scores_file)
+    elapsed_deminf = time.monotonic() - t_deminf
+    print(f"  DemInf scoring complete in {elapsed_deminf:.1f}s\n")
 
     # --- Cohort accumulation (sequential mode) ---
     print("[ Cohort Accumulation ]")
@@ -344,22 +325,17 @@ def main():
         catalog=catalog,
         cohort_queue=cohort_queue,
         pipeline_cfg=pipeline_cfg,
-        vae_version="mock-vae-v1",
-        reference_set_version="mock-ref-v1",
+        vae_version="v1",
+        reference_set_version="v1",
     )
     print(f"  Tasks: {all_tasks}")
     print(f"  Cohorts emitted: {len(cohort_ids)}\n")
 
     # --- Stage B: DemInf lookup ---
-    if rdf_models == "real":
-        print(f"[ Stage B — DemInf (real, scores from {deminf_scores_file}) ]")
-        from rdf.models.deminf_worker import DeminfWorker
-        deminf_model = DeminfWorker(scores_file=deminf_scores_file)
-        deminf_threshold = float(os.environ.get("RDF_DEMINF_THRESHOLD", "-10.0"))
-    else:
-        print("[ Stage B — DemInf (mock) ]")
-        deminf_model = MockDeminfModel()
-        deminf_threshold = 0.0
+    print(f"[ Stage B — DemInf (scores from {deminf_scores_file}) ]")
+    from rdf.models.deminf_worker import DeminfWorker
+    deminf_model = DeminfWorker(scores_file=deminf_scores_file)
+    deminf_threshold = float(os.environ.get("RDF_DEMINF_THRESHOLD", "-10.0"))
 
     t_b = time.monotonic()
     n_b = run_stage_b(

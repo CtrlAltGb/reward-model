@@ -11,7 +11,6 @@ from rdf.decision.decide import decide_all, decide_episode
 from rdf.decision.materialize import materialize_task
 from rdf.harness.catalog import LocalCatalog
 from rdf.harness.storage import LocalObjectStore
-from rdf.models.mock import MockDeminfModel
 from rdf.models.registry import VaeArtifact, VaeRegistry
 from rdf.schemas.models import CatalogRow
 

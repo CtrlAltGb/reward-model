@@ -1,1 +1,1 @@
-"""Model workers: mock, robometer, deminf."""
+"""Model workers: robometer, deminf."""

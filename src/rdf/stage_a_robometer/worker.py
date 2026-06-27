@@ -2,14 +2,14 @@
 
 Three execution modes, selected by which arguments are passed to run_worker():
 
-  Streaming (preferred for real runs, lowest latency):
+  Streaming (preferred, lowest latency):
     Call stream_episodes() in a background thread — it drains the episode
     queue and preprocesses videos, emitting each decoded episode into a
     threading.Queue as it finishes.  Pass that queue as decoded_stream to
     run_worker().  Scoring starts the moment the model is ready and the
     first episode is decoded — no barrier between decode and score.
 
-  Batch prefetch (legacy / test):
+  Batch prefetch:
     Call prefetch_episodes() then pass the result as prefetched to
     run_worker().  All decoding completes before scoring begins.
 
@@ -19,7 +19,6 @@ Three execution modes, selected by which arguments are passed to run_worker():
 
 from __future__ import annotations
 
-import os
 import queue as _stdlib_queue
 import signal
 import tempfile
@@ -41,10 +40,6 @@ logger = get_logger(__name__)
 
 
 def _get_model() -> RobometerModel:
-    backend = os.environ.get("RDF_MODELS", "mock")
-    if backend == "mock":
-        from rdf.models.mock import MockRobometerModel
-        return MockRobometerModel()
     from rdf.models.robometer_worker import RobometerLocalWorker
     return RobometerLocalWorker()
 
