@@ -23,7 +23,8 @@ NOW = datetime.now(timezone.utc)
 def test_episode_manifest_roundtrip():
     ep = EpisodeManifest(
         episode_id="ep-001", s3_prefix="raw/ep-001/", robot_id="r1",
-        embodiment="franka", task="pick_cup", instruction="Pick up the cup",
+        embodiment="franka", task="pick_cup", task_id="pick_cup_v1",
+        instruction="Pick up the cup",
         head_video_key="raw/ep-001/head.mp4", mcap_key="raw/ep-001/data.mcap",
         metadata_key="raw/ep-001/metadata.yaml", created_at=NOW,
     )

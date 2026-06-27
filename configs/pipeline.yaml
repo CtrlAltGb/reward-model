@@ -20,6 +20,12 @@ reference_set_version: v1
 # Default embodiment used by Stage B to look up MCAP topic names
 embodiment: franka
 
+# ── Task ID ───────────────────────────────────────────────────────────────────
+
+# Fallback task_id used when metadata.yaml has no task_id field.
+# DemInf episode data is organised under deminf_data_dir/{task_id}/train/.
+default_task_id: "001"
+
 # ── Pipeline mode ─────────────────────────────────────────────────────────────
 
 # sequential: accumulate all Stage A results, then run one DemInf cohort per task

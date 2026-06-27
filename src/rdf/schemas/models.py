@@ -16,6 +16,7 @@ class EpisodeManifest(BaseModel):
     robot_id: str
     embodiment: str
     task: str
+    task_id: str
     instruction: str
     head_video_key: str
     mcap_key: str
@@ -129,6 +130,8 @@ class PipelineConfig(BaseModel):
     reference_set_version: str = "v1"
     # Default embodiment for Stage B
     embodiment: str = "franka"
+    # Fallback task_id when metadata.yaml has no task_id field
+    default_task_id: str = "001"
 
 
 class PathsConfig(BaseModel):
