@@ -102,6 +102,17 @@ Verify:
 /data/.conda/envs/openx/bin/pip install -e /data/reward_model
 ```
 
+### 5 — Log in to Weights & Biases (required for VAE auto-training)
+
+The pipeline auto-trains a DemInf VAE when no checkpoint exists for a task_id.
+The training script uses WandB for logging — you must be logged in once per machine:
+
+```bash
+/data/.conda/envs/openx/bin/wandb login
+```
+
+Paste your API key from https://wandb.ai/authorize when prompted.
+
 ---
 
 ## Configuration
