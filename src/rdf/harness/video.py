@@ -1,10 +1,9 @@
 """Video preprocessing and frame extraction from MP4 bytes.
 
 Preprocessing pipeline (applied before any model scoring):
-  1. Decode at native fps
-  2. Center-crop each frame to H×H (H = min(height, width))
+  1. Decode frames at native fps, subsampling on-the-fly (never buffers all frames)
+  2. Center-crop each selected frame to H×H (H = min(height, width))
   3. Resize to target_size × target_size (default 256)
-  4. Resample to target_fps (default 2 fps)
 
 Falls back to dummy arrays when av/PIL are not importable (test env).
 """
@@ -15,7 +14,6 @@ import io
 
 import numpy as np
 
-_FALLBACK_SIZE = 256
 _TARGET_FPS = 2.0
 _TARGET_SIZE = 256
 
@@ -43,11 +41,9 @@ def preprocess_video(
 ) -> np.ndarray:
     """Decode, center-crop, resize, and resample an MP4 to a clean frame array.
 
-    Steps:
-      1. Decode all frames from mp4_bytes at native fps.
-      2. Center-crop each frame to a square (min(H,W) × min(H,W)).
-      3. Resize to target_size × target_size.
-      4. Subsample to target_fps by picking evenly-spaced frame indices.
+    Subsamples on-the-fly during decode — never materializes all frames in memory.
+    For a 30 fps video at 2 fps output this processes ~1/15 of the frames through
+    to_ndarray + crop + resize instead of all of them.
 
     Returns:
         uint8 array of shape (T, target_size, target_size, 3).
@@ -61,29 +57,25 @@ def preprocess_video(
     try:
         container = av.open(io.BytesIO(mp4_bytes))
         stream = container.streams.video[0]
-
-        # Native fps — fall back to 30 if unavailable
         native_fps: float = float(stream.average_rate or stream.guessed_rate or 30)
 
-        raw_frames: list[np.ndarray] = []
-        for frame in container.decode(stream):
-            raw_frames.append(frame.to_ndarray(format="rgb24"))
+        # Decode every step-th frame — avoids buffering the whole video.
+        step = max(1, int(round(native_fps / target_fps)))
+
+        output_frames: list[np.ndarray] = []
+        for i, frame in enumerate(container.decode(stream)):
+            if i % step == 0:
+                rgb = frame.to_ndarray(format="rgb24")
+                output_frames.append(_resize(_center_crop_square(rgb), target_size))
+
         container.close()
     except Exception:
         return np.zeros((1, target_size, target_size, 3), dtype=np.uint8)
 
-    if not raw_frames:
+    if not output_frames:
         return np.zeros((1, target_size, target_size, 3), dtype=np.uint8)
 
-    # Subsample first, then preprocess only the selected frames
-    total = len(raw_frames)
-    duration_s = total / native_fps
-    n_output = max(1, int(round(duration_s * target_fps)))
-    indices = np.linspace(0, total - 1, n_output, dtype=int)
-
-    return np.stack([
-        _resize(_center_crop_square(raw_frames[i]), target_size) for i in indices
-    ])
+    return np.stack(output_frames)
 
 
 def extract_frames(mp4_bytes: bytes, n_frames: int = 8) -> np.ndarray:

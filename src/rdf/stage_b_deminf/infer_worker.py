@@ -35,11 +35,7 @@ def _get_model(
         from rdf.models.mock import MockDeminfModel
         return MockDeminfModel()
     from rdf.models.deminf_worker import DeminfWorker
-    return DeminfWorker(
-        obs_ckpt=obs_ckpt,
-        action_ckpt=action_ckpt,
-        reference_latents_path=reference_latents_path,
-    )
+    return DeminfWorker()
 
 
 def run_infer_worker(
@@ -128,36 +124,43 @@ def run_infer_worker(
             episode_actions = []
             valid_episode_ids = []
 
-            for episode_id in cohort.episode_ids:
-                row = catalog.get_row(episode_id)
-                if row is None:
-                    logger.warning("Episode not in catalog", episode_id=episode_id)
-                    continue
-
-                if already_scored_deminf(catalog, episode_id, cohort.vae_version):
-                    logger.info("Skipping — already scored", episode_id=episode_id)
-                    continue
-
-                # Load episode data from MCAP
-                manifest_row = catalog.get_row(episode_id)
-                try:
-                    # Build the MCAP key from catalog row (episode stored under task prefix)
-                    mcap_key = f"raw/{episode_id}/data.mcap"
-                    if store.exists(mcap_key):
-                        mcap_bytes = store.get_bytes(mcap_key)
-                    else:
-                        # Use synthetic data in test/mock mode
-                        import hashlib
-                        mcap_bytes = hashlib.md5(episode_id.encode()).digest() * 64
-
-                    states, actions = extract_state_action(
-                        mcap_bytes, embodiment_cfg, reader=mcap_reader
-                    )
-                    episode_states.append(states)
-                    episode_actions.append(actions)
+            # Fast-path: DeminfWorker uses pre-computed scores — skip MCAP entirely
+            if hasattr(_model, "score_episodes_by_id"):
+                for episode_id in cohort.episode_ids:
+                    if catalog.get_row(episode_id) is None:
+                        logger.warning("Episode not in catalog", episode_id=episode_id)
+                        continue
+                    if already_scored_deminf(catalog, episode_id, cohort.vae_version):
+                        logger.info("Skipping — already scored", episode_id=episode_id)
+                        continue
                     valid_episode_ids.append(episode_id)
-                except Exception as exc:
-                    logger.error("Failed to load episode MCAP", episode_id=episode_id, error=str(exc))
+            else:
+                for episode_id in cohort.episode_ids:
+                    row = catalog.get_row(episode_id)
+                    if row is None:
+                        logger.warning("Episode not in catalog", episode_id=episode_id)
+                        continue
+
+                    if already_scored_deminf(catalog, episode_id, cohort.vae_version):
+                        logger.info("Skipping — already scored", episode_id=episode_id)
+                        continue
+
+                    try:
+                        mcap_key = f"raw/{episode_id}/data.mcap"
+                        if store.exists(mcap_key):
+                            mcap_bytes = store.get_bytes(mcap_key)
+                        else:
+                            import hashlib
+                            mcap_bytes = hashlib.md5(episode_id.encode()).digest() * 64
+
+                        states, actions = extract_state_action(
+                            mcap_bytes, embodiment_cfg, reader=mcap_reader
+                        )
+                        episode_states.append(states)
+                        episode_actions.append(actions)
+                        valid_episode_ids.append(episode_id)
+                    except Exception as exc:
+                        logger.error("Failed to load episode MCAP", episode_id=episode_id, error=str(exc))
 
             if not valid_episode_ids:
                 logger.info("No valid episodes in cohort")

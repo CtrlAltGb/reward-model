@@ -31,7 +31,7 @@ from rdf.harness.queue import LocalQueue
 from rdf.harness.storage import ObjectStore
 from rdf.models.mock import MockDeminfModel, MockRobometerModel
 from rdf.schemas.models import CatalogRow, CohortMessage, EpisodeManifest, PipelineConfig
-from rdf.stage_a_robometer.worker import run_worker as run_stage_a
+from rdf.stage_a_robometer.worker import prefetch_episodes, run_worker as run_stage_a
 from rdf.stage_b_deminf.infer_worker import run_infer_worker as run_stage_b
 from rdf.decision.decide import decide_all
 
@@ -177,11 +177,19 @@ def main():
     rdf_models = os.environ.get("RDF_MODELS", "mock")
     print(f"[ Stage A — Robometer ({rdf_models}) ]")
     robometer_threshold = float(os.environ.get("RDF_ROBOMETER_THRESHOLD", "0.5"))
+    max_a = int(os.environ.get("RDF_MAX_EPISODES", len(manifests)))
+    if max_a < len(manifests):
+        print(f"  (smoke-test mode: processing {max_a}/{len(manifests)} episodes)")
+
     _robometer_server_proc = None
+    prefetched = None
+
     if rdf_models == "mock":
         robometer_model = MockRobometerModel()
     else:
         import subprocess as _sp
+        import threading as _threading
+
         _robometer_server_proc = _sp.Popen(
             [
                 "/data/robometer/.venv/bin/python3",
@@ -195,6 +203,28 @@ def main():
             stdout=_sp.DEVNULL,
             stderr=_sp.DEVNULL,
         )
+
+        # Phase 1: decode all episodes in parallel while the server loads.
+        # prefetch_episodes needs no GPU — safe to run before server is ready.
+        _prefetch_result: list = []
+        _prefetch_exc: list = []
+
+        def _run_prefetch():
+            try:
+                result = prefetch_episodes(
+                    queue=episode_queue,
+                    store=store,
+                    catalog=catalog,
+                    model_version="Robometer-4B",
+                    max_episodes=max_a,
+                )
+                _prefetch_result.append(result)
+            except Exception as exc:
+                _prefetch_exc.append(exc)
+
+        prefetch_thread = _threading.Thread(target=_run_prefetch, daemon=True)
+        prefetch_thread.start()
+
         import requests as _req
         print("  Waiting for Robometer server …", flush=True)
         for _ in range(120):
@@ -208,11 +238,14 @@ def main():
             _robometer_server_proc.kill()
             raise RuntimeError("Robometer server did not start in 600s")
         print("  Server ready.", flush=True)
+
+        prefetch_thread.join()
+        if _prefetch_exc:
+            raise _prefetch_exc[0]
+        prefetched = _prefetch_result[0]
+
         from rdf.models.robometer_worker import RobometerWorker
         robometer_model = RobometerWorker()
-    max_a = int(os.environ.get("RDF_MAX_EPISODES", len(manifests)))
-    if max_a < len(manifests):
-        print(f"  (smoke-test mode: processing {max_a}/{len(manifests)} episodes)")
 
     t_a = time.monotonic()
     n_a = run_stage_a(
@@ -223,6 +256,7 @@ def main():
         robometer_threshold=robometer_threshold,
         poll_wait=0,
         max_episodes=max_a,
+        prefetched=prefetched,
     )
     elapsed_a = time.monotonic() - t_a
 
