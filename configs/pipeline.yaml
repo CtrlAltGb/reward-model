@@ -6,9 +6,13 @@
 # Stage A gate: episodes with robometer_success_pred < this are dropped
 robometer_threshold: 0.5
 
-# Stage B trim: episodes with deminf_score < this are dropped
-# Typical range: -20 (permissive) to 0 (strict). Default -10 keeps most passes.
+# Stage B trim: episodes with deminf_score < this are dropped.
+# Ignored when deminf_filter_bottom_pct > 0.
 deminf_threshold: -1.0
+
+# Drop the bottom N% of episodes by DemInf score (percentile-based filter).
+# Set to 0.0 to use the fixed deminf_threshold above instead.
+deminf_filter_bottom_pct: 0.20
 
 # ── Versioning ────────────────────────────────────────────────────────────────
 

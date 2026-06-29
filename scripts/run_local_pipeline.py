@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 os.environ.setdefault("RDF_STORAGE", "local")
 
 import time
-import uuid
 from datetime import datetime, timezone
 
 import yaml
@@ -31,7 +30,7 @@ from rdf.harness.catalog import LocalCatalog
 from rdf.harness.config import get_models_config, get_paths_config, get_pipeline_config
 from rdf.harness.queue import LocalQueue
 from rdf.harness.storage import ObjectStore
-from rdf.schemas.models import CatalogRow, CohortMessage, EpisodeManifest
+from rdf.schemas.models import CatalogRow, EpisodeManifest
 from rdf.stage_a_robometer.worker import run_worker as run_stage_a
 from rdf.stage_a_robometer.worker import stream_episodes
 from rdf.stage_b_deminf.infer_worker import run_infer_worker as run_stage_b
@@ -93,23 +92,34 @@ def _setup_deminf_data(manifests: list) -> int:
     return added
 
 
-def _get_checkpoint_for_task(task_id: str) -> str | None:
-    """Return the best checkpoint path for task_id, or None if none exist.
+def _get_checkpoints_for_task(task_id: str) -> dict[str, str] | None:
+    """Return {"obs": path, "action": path} for task_id, or None if either is missing.
 
-    Prefers the configured deminf_train_steps checkpoint; falls back to the
-    highest available step if that exact step hasn't been saved yet.
+    Looks in {task_ckpt_dir}/obs_vae/ and {task_ckpt_dir}/action_vae/.
+    Prefers the configured deminf_train_steps; falls back to highest available step.
     """
     task_ckpt_dir = Path(_paths.deminf_ckpts_dir) / task_id
     if not task_ckpt_dir.exists():
         return None
-    exact = sorted(task_ckpt_dir.glob(f"*/{_models.deminf_train_steps}"))
-    if exact:
-        return str(exact[-1])
-    all_steps = sorted(
-        task_ckpt_dir.glob("*/[0-9]*"),
-        key=lambda p: int(p.name),
-    )
-    return str(all_steps[-1]) if all_steps else None
+
+    def _best(subdir: str) -> str | None:
+        d = task_ckpt_dir / subdir
+        if not d.exists():
+            return None
+        target = d / str(_models.deminf_train_steps)
+        if target.exists():
+            return str(target)
+        steps = sorted(
+            [p for p in d.iterdir() if p.name.isdigit()],
+            key=lambda p: int(p.name),
+        )
+        return str(steps[-1]) if steps else None
+
+    obs = _best("obs_vae")
+    action = _best("action_vae")
+    if obs and action:
+        return {"obs": obs, "action": action}
+    return None
 
 
 def _setup_training_data(task_id: str, pass_episode_ids: list[str]) -> None:
@@ -182,16 +192,19 @@ def _preprocess_deminf_data(task_id: str, splits: list[str]) -> None:
         )
 
 
-def _train_deminf_for_task(task_id: str, pass_episode_ids: list[str]) -> str:
-    """Train a DemInf VAE for task_id and return the checkpoint path.
+def _train_deminf_for_task(task_id: str, pass_episode_ids: list[str]) -> dict[str, str]:
+    """Train obs_vae and action_vae for task_id and return {"obs": path, "action": path}.
 
     Steps:
       1. Create train_sel/ and test_sel/ symlinks (subset of pass episodes).
       2. Preprocess those episodes to _cached.npz so training loads instantly.
-      3. Run scripts/train.py in the openx conda env.
+      3. For Manav datasets, pre-generate dataset_statistics_openx.json.
+      4. Train obs_vae (state-only, config_str="obs").
+      5. Train action_vae (action-chunk-only, config_str="action").
 
-    Saves checkpoints to deminf_ckpts_dir/{task_id}/clean_data_vae/ every
-    deminf_train_save_freq steps; total steps = deminf_train_steps.
+    Checkpoints land at:
+      deminf_ckpts_dir/{task_id}/obs_vae/{step}/
+      deminf_ckpts_dir/{task_id}/action_vae/{step}/
     """
     import subprocess
 
@@ -233,40 +246,44 @@ def _train_deminf_for_task(task_id: str, pass_episode_ids: list[str]) -> str:
         else "--config.dataloader.recompute_statistics=True"
     )
 
-    proc = subprocess.run(
-        [
-            _OPENX_PYTHON,
-            str(train_script),
-            f"--config={config_path}:sa",
-            f"--path={output_dir}",
-            "--name=clean_data_vae",
-            "--include_timestamp=False",
-            f"--config.steps={_models.deminf_train_steps}",
-            f"--config.save_freq={_models.deminf_train_save_freq}",
-            "--config.dataloader.datasets.clean_data.train_split=train_sel",
-            "--config.dataloader.datasets.clean_data.val_split=test_sel",
-            recompute_flag,
-        ],
-        cwd=_paths.deminf_root,
-        env=env,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"DemInf VAE training failed for task_id={task_id!r} (exit {proc.returncode})"
+    for vae_name, cfg_str in [("obs_vae", "obs"), ("action_vae", "action")]:
+        print(f"  Training {vae_name} (config_str={cfg_str!r}) …", flush=True)
+        # --config must come before any --config.* overrides (ml_collections requirement)
+        proc = subprocess.run(
+            [
+                _OPENX_PYTHON,
+                str(train_script),
+                f"--config={config_path}:{cfg_str}",
+                f"--path={output_dir}",
+                f"--name={vae_name}",
+                "--include_timestamp=False",
+                f"--config.steps={_models.deminf_train_steps}",
+                f"--config.save_freq={_models.deminf_train_save_freq}",
+                "--config.dataloader.datasets.clean_data.train_split=train_sel",
+                "--config.dataloader.datasets.clean_data.val_split=test_sel",
+                recompute_flag,
+            ],
+            cwd=_paths.deminf_root,
+            env=env,
         )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"DemInf {vae_name} training failed for task_id={task_id!r}"
+                f" (exit {proc.returncode})"
+            )
 
-    ckpt = _get_checkpoint_for_task(task_id)
-    if not ckpt:
-        raise RuntimeError(f"Checkpoint not found after training for task_id={task_id!r}")
-    return ckpt
+    ckpts = _get_checkpoints_for_task(task_id)
+    if not ckpts:
+        raise RuntimeError(f"Checkpoints not found after training for task_id={task_id!r}")
+    return ckpts
 
 
-def _run_deminf_scoring(manifests: list, ckpts_by_task: dict[str, str]) -> None:
-    """Run deminf_score_episodes.py once per task_id using the given checkpoints.
+def _run_deminf_scoring(manifests: list, ckpts_by_task: dict[str, dict[str, str]]) -> None:
+    """Run deminf_score_episodes.py once per task_id using separate obs + action checkpoints.
 
-    Each run gets RDF_DEMINF_DATA → DEMINF_DATA/{task_id} and RDF_DEMINF_CKPT →
-    the resolved checkpoint for that task.  Per-task scores are merged into the
-    single shared scores file at paths_config.deminf_scores_file.
+    Each run gets RDF_DEMINF_DATA → DEMINF_DATA/{task_id},
+    RDF_DEMINF_OBS_CKPT and RDF_DEMINF_ACTION_CKPT for that task.
+    Per-task scores are merged into the single shared scores file.
     """
     import json
     import subprocess
@@ -278,14 +295,16 @@ def _run_deminf_scoring(manifests: list, ckpts_by_task: dict[str, str]) -> None:
         by_task[m.task_id].append(m)
 
     all_scores: dict[str, float] = {}
-    last_ckpt = ""
+    last_obs_ckpt = ""
 
     for task_id in sorted(by_task):
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             tmp_scores = f.name
+        ckpts = ckpts_by_task[task_id]
         env = os.environ.copy()
         env["RDF_DEMINF_DATA"] = str(DEMINF_DATA / task_id)
-        env["RDF_DEMINF_CKPT"] = ckpts_by_task[task_id]
+        env["RDF_DEMINF_OBS_CKPT"] = ckpts["obs"]
+        env["RDF_DEMINF_ACTION_CKPT"] = ckpts["action"]
         env["RDF_DEMINF_SCORES"] = tmp_scores
         proc = subprocess.run(
             [_OPENX_PYTHON, str(_DEMINF_SCORE_SCRIPT)],
@@ -299,14 +318,14 @@ def _run_deminf_scoring(manifests: list, ckpts_by_task: dict[str, str]) -> None:
         with open(tmp_scores) as f:
             data = json.load(f)
         all_scores.update(data.get("scores", {}))
-        last_ckpt = data.get("ckpt", last_ckpt)
+        last_obs_ckpt = data.get("obs_ckpt", last_obs_ckpt)
         os.unlink(tmp_scores)
 
     scores_out = Path(_paths.deminf_scores_file)
     scores_out.parent.mkdir(parents=True, exist_ok=True)
     scores_out.write_text(
         json.dumps(
-            {"scores": all_scores, "split": _models.deminf_split, "ckpt": last_ckpt},
+            {"scores": all_scores, "split": _models.deminf_split, "obs_ckpt": last_obs_ckpt},
             indent=2,
         )
     )
@@ -571,25 +590,32 @@ def main():
     else:
         print(f"  All {n_total} episodes already present  task_ids={task_ids}")
 
-    # Resolve (or auto-train) the VAE checkpoint for each task_id
-    ckpts_by_task: dict[str, str] = {}
+    # Resolve (or auto-train) obs_vae + action_vae checkpoints for each task_id
+    ckpts_by_task: dict[str, dict[str, str]] = {}
     for task_id in task_ids:
-        ckpt = _get_checkpoint_for_task(task_id)
-        if ckpt:
-            print(f"  Checkpoint found for task_id={task_id!r}: {ckpt}")
+        ckpts = _get_checkpoints_for_task(task_id)
+        if ckpts:
+            print(f"  Checkpoints found for task_id={task_id!r}:")
+            print(f"    obs_vae    : {ckpts['obs']}")
+            print(f"    action_vae : {ckpts['action']}")
         else:
             print(
-                f"  No checkpoint for task_id={task_id!r} — training VAE"
-                f" ({_models.deminf_train_episodes} episodes, {_models.deminf_train_steps} steps) …",
+                f"  No checkpoints for task_id={task_id!r} —"
+                f" training obs_vae + action_vae"
+                f" ({_models.deminf_train_episodes} eps,"
+                f" {_models.deminf_train_steps} steps) …",
                 flush=True,
             )
             task_pass_ep_ids = [
                 m.episode_id for m in pass_manifests if m.task_id == task_id
             ]
             t_train = time.monotonic()
-            ckpt = _train_deminf_for_task(task_id, task_pass_ep_ids)
-            print(f"  Training complete in {time.monotonic() - t_train:.1f}s  ckpt={ckpt}")
-        ckpts_by_task[task_id] = ckpt
+            ckpts = _train_deminf_for_task(task_id, task_pass_ep_ids)
+            print(
+                f"  Training complete in {time.monotonic() - t_train:.1f}s"
+                f"  obs={ckpts['obs']}  action={ckpts['action']}"
+            )
+        ckpts_by_task[task_id] = ckpts
 
     # Preprocess any uncached pass episodes before scoring (idempotent)
     for task_id in task_ids:
@@ -600,6 +626,19 @@ def main():
     _run_deminf_scoring(pass_manifests, ckpts_by_task)
     elapsed_deminf = time.monotonic() - t_deminf
     print(f"  DemInf scoring complete in {elapsed_deminf:.1f}s\n")
+
+    # Compute percentile-based threshold if configured
+    if _pipeline.deminf_filter_bottom_pct > 0.0:
+        import json as _json
+        scores_data = _json.loads(Path(_paths.deminf_scores_file).read_text())
+        score_vals = sorted(scores_data["scores"].values())
+        pct = _pipeline.deminf_filter_bottom_pct
+        cutoff_idx = int(len(score_vals) * pct)
+        deminf_threshold = score_vals[cutoff_idx]
+        print(
+            f"  Percentile filter: bottom {pct*100:.0f}% → threshold={deminf_threshold:.4f}"
+            f"  (cutoff at rank {cutoff_idx}/{len(score_vals)})\n"
+        )
 
     # --- Cohort accumulation (sequential mode) ---
     print("[ Cohort Accumulation ]")

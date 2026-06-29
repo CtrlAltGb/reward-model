@@ -1,47 +1,48 @@
 """
 Pre-process Manav dual-arm MCAP episodes to _cached.npz files.
 
-Reads native ROS2 CDR-encoded MCAP topics and produces the same npz format
-as _read_mcap_episode's cache (state[T,32], action[T,36], is_first, is_last,
-observation.images.cam_head).
+Reads native ROS2 CDR-encoded MCAP topics and produces a chunked npz format
+for the manav_chunked_transform (state[T',14], action[T',140], is_first,
+is_last, observation.images.cam_head), where T' = T - chunk_size + 1.
 
-State layout (32 dims):
-    [0:16]  joint positions from /manav/joint_states (order: la1,neck,ra1,la2,head,ra2,...,la7,ra7)
-    [16]    left gripper from /manav/teleop/target
-    [17]    right gripper from /manav/teleop/target
-    [18:25] right wrist pose (xyz + qxyzw) from /manav/teleop/target
-    [25:32] left  wrist pose (xyz + qxyzw) from /manav/teleop/target
+State layout (14 dims, at chunk-start frame):
+    [0:7]   left arm joint positions from /manav/joint_states
+            (la1, la2, la3, la4, la5, la6, la7)
+    [7:14]  left wrist pose (xyz + qxyzw) from /manav/teleop/target
 
-Action layout (36 dims):
-    [0:7]   left  arm commands from /l_arm_pos_controller/commands
-    [7:14]  right arm commands from /r_arm_pos_controller/commands
-    [14:16] head  commands     from /head_pos_controller/commands
-    [16]    left  gripper      from /manav/teleop/target
-    [17]    right gripper      from /manav/teleop/target
-    [18:24] left  hand joints  from /manav/hands/left/command (6 joints)
-    [24:36] zeros              (right hand / padding)
+Action layout (chunk_size * 14 = 140 dims, time-first flattened):
+    chunk[j][0:6]   left hand joint commands (chunk_size × 6 = 60 total)
+    chunk[j][6]     left gripper             (chunk_size × 1 = 10 total)
+    chunk[j][7:14]  left wrist target pose   (chunk_size × 7 = 70 total)
+
+NaN handling: /manav/teleop/target messages at episode start are NaN (teleop
+controller not yet active). Only valid (non-NaN) messages are used for
+nearest-neighbour sync. Frames that cannot be synced to any valid message
+are skipped.
 
 Frame sync: /manav/cameras/head_cam/frame_index (10 fps)
 Subsampled: every other frame → 5 fps
 
 Usage:
-    /data/.conda/envs/openx/bin/python3 scripts/preprocess_manav_episodes.py \
+    /data/.conda/envs/openx/bin/python3 scripts/preprocess_manav_episodes.py \\
         --root deminf_data/002 --splits train_sel test_sel --workers 4
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)) + "/src")
 
 SUBSAMPLE = 2  # 10 fps → 5 fps
+
+# Left arm joint indices within /manav/joint_states position array
+# Order in joint_states: la1, neck, ra1, la2, head, ra2, la3, ra3, la4, ra4, la5, ra5, la6, ra6, la7, ra7
+_LA_INDICES = [0, 3, 6, 8, 10, 12, 14]  # la1..la7
 
 
 def _nearest(timestamps: list[float], t: float) -> int:
@@ -57,6 +58,8 @@ def _nearest(timestamps: list[float], t: float) -> int:
 
 
 def process_one(ep_dir: str) -> tuple:
+    import math
+
     import numpy as np
 
     ep_name = os.path.basename(ep_dir)
@@ -68,7 +71,6 @@ def process_one(ep_dir: str) -> tuple:
 
     mcap_path = os.path.join(ep_dir, ep_name + "_0.mcap")
     if not os.path.exists(mcap_path):
-        # Fall back to canonical alias created by _setup_deminf_data
         mcap_path = os.path.join(ep_dir, ep_name + ".mcap")
     if not os.path.exists(mcap_path):
         raise FileNotFoundError(f"No MCAP found in {ep_dir}")
@@ -78,25 +80,21 @@ def process_one(ep_dir: str) -> tuple:
     TOPICS = [
         "/manav/cameras/head_cam/frame_index",
         "/manav/joint_states",
-        "/l_arm_pos_controller/commands",
-        "/r_arm_pos_controller/commands",
-        "/head_pos_controller/commands",
-        "/manav/teleop/target",
         "/manav/hands/left/command",
+        "/manav/teleop/target",
     ]
 
-    # Collect all messages by topic, keyed by log_time in seconds
     buckets: dict[str, list] = {t: [] for t in TOPICS}
     for msg in read_ros2_messages(mcap_path, topics=TOPICS):
         lt = msg.log_time
         t_s = lt.hour * 3600 + lt.minute * 60 + lt.second + lt.microsecond * 1e-6
         buckets[msg.channel.topic].append((t_s, msg.ros_msg))
 
-    fi_msgs = sorted(buckets["/manav/cameras/head_cam/frame_index"], key=lambda x: x[0])
+    fi_msgs = sorted(buckets["/manav/cameras/head_cam/frame_index"], key=lambda x: x[1].frame_number)
     if not fi_msgs:
         raise RuntimeError(f"No frame_index messages in {ep_dir}")
 
-    # Build lookup lists for nearest-neighbour sync
+    # Build lookup lists
     def _times(topic):
         return [x[0] for x in buckets[topic]]
 
@@ -105,63 +103,26 @@ def process_one(ep_dir: str) -> tuple:
 
     js_times = _times("/manav/joint_states")
     js_msgs = _msgs("/manav/joint_states")
-    la_times = _times("/l_arm_pos_controller/commands")
-    la_msgs = _msgs("/l_arm_pos_controller/commands")
-    ra_times = _times("/r_arm_pos_controller/commands")
-    ra_msgs = _msgs("/r_arm_pos_controller/commands")
-    hd_times = _times("/head_pos_controller/commands")
-    hd_msgs = _msgs("/head_pos_controller/commands")
-    tt_times = _times("/manav/teleop/target")
-    tt_msgs = _msgs("/manav/teleop/target")
+
     lh_times = _times("/manav/hands/left/command")
     lh_msgs = _msgs("/manav/hands/left/command")
 
-    def _get_js(t):
-        if not js_msgs:
-            return np.zeros(16, dtype=np.float32)
-        m = js_msgs[_nearest(js_times, t)]
-        return np.array(list(m.position)[:16], dtype=np.float32)
+    # Pre-filter teleop/target to valid (non-NaN) messages only
+    tt_valid = [
+        (t, m) for t, m in buckets["/manav/teleop/target"]
+        if not math.isnan(m.left.wrist_pose.position.x) and not math.isnan(m.left.gripper)
+    ]
+    if not tt_valid:
+        raise RuntimeError(f"No valid (non-NaN) /manav/teleop/target messages in {ep_dir}")
+    tt_times_v = [x[0] for x in tt_valid]
+    tt_msgs_v = [x[1] for x in tt_valid]
 
     def _get_la(t):
-        if not la_msgs:
+        if not js_msgs:
             return np.zeros(7, dtype=np.float32)
-        m = la_msgs[_nearest(la_times, t)]
-        return np.array(list(m.data)[:7], dtype=np.float32)
-
-    def _get_ra(t):
-        if not ra_msgs:
-            return np.zeros(7, dtype=np.float32)
-        m = ra_msgs[_nearest(ra_times, t)]
-        return np.array(list(m.data)[:7], dtype=np.float32)
-
-    def _get_head(t):
-        if not hd_msgs:
-            return np.zeros(2, dtype=np.float32)
-        m = hd_msgs[_nearest(hd_times, t)]
-        return np.array(list(m.data)[:2], dtype=np.float32)
-
-    def _get_teleop(t):
-        """Return (left_gripper, right_gripper, r_wrist[7], l_wrist[7]) or zeros."""
-        if not tt_msgs:
-            return 0.0, 0.0, np.zeros(7, np.float32), np.zeros(7, np.float32)
-        # Find nearest non-NaN message
-        idx = _nearest(tt_times, t)
-        for offset in range(len(tt_msgs)):
-            i = (idx + offset) % len(tt_msgs)
-            m = tt_msgs[i]
-            lg = m.left.gripper
-            rg = m.right.gripper
-            if not (math.isnan(lg) or math.isnan(rg)):
-                wp_r = m.right.wrist_pose
-                wp_l = m.left.wrist_pose
-                def _pose(wp):
-                    vals = [wp.position.x, wp.position.y, wp.position.z,
-                            wp.orientation.x, wp.orientation.y, wp.orientation.z, wp.orientation.w]
-                    if any(math.isnan(v) for v in vals):
-                        return np.zeros(7, np.float32)
-                    return np.array(vals, dtype=np.float32)
-                return float(lg), float(rg), _pose(wp_r), _pose(wp_l)
-        return 0.0, 0.0, np.zeros(7, np.float32), np.zeros(7, np.float32)
+        m = js_msgs[_nearest(js_times, t)]
+        pos = list(m.position)
+        return np.array([pos[i] for i in _LA_INDICES], dtype=np.float32)
 
     def _get_lhand(t):
         if not lh_msgs:
@@ -169,35 +130,36 @@ def process_one(ep_dir: str) -> tuple:
         m = lh_msgs[_nearest(lh_times, t)]
         return np.array(list(m.positions)[:6], dtype=np.float32)
 
-    # Build per-frame arrays (all frames, then subsample)
+    def _get_teleop(t):
+        """Return (left_gripper, left_wrist_pose[7]) from nearest valid teleop/target."""
+        m = tt_msgs_v[_nearest(tt_times_v, t)]
+        lg = float(m.left.gripper)
+        wp = m.left.wrist_pose
+        wrist = np.array([
+            wp.position.x, wp.position.y, wp.position.z,
+            wp.orientation.x, wp.orientation.y, wp.orientation.z, wp.orientation.w,
+        ], dtype=np.float32)
+        return lg, wrist
+
+    # Subsample frames
     all_fi = sorted(fi_msgs, key=lambda x: x[1].frame_number)
-    # Subsample every SUBSAMPLE frames (10fps → 5fps)
     fi_sub = all_fi[::SUBSAMPLE]
+
+    # Only keep frames within the valid teleop/target time window
+    t_teleop_start = tt_times_v[0]
+    fi_sub = [(t, m) for t, m in fi_sub if t >= t_teleop_start]
+    if not fi_sub:
+        raise RuntimeError(f"No frames within valid teleop window in {ep_dir}")
 
     states = []
     actions = []
     for t_s, _ in fi_sub:
-        js = _get_js(t_s)
         la = _get_la(t_s)
-        ra = _get_ra(t_s)
-        hd = _get_head(t_s)
-        lg, rg, wp_r, wp_l = _get_teleop(t_s)
         lh = _get_lhand(t_s)
+        lg, wp = _get_teleop(t_s)
 
-        state = np.concatenate([
-            js,                          # [0:16]  joint positions
-            [lg, rg],                    # [16:18] gripper
-            wp_r,                        # [18:25] right wrist
-            wp_l,                        # [25:32] left wrist
-        ]).astype(np.float32)
-        action = np.concatenate([
-            la,                          # [0:7]   left arm
-            ra,                          # [7:14]  right arm
-            hd,                          # [14:16] head
-            [lg, rg],                    # [16:18] gripper
-            lh,                          # [18:24] left hand
-            np.zeros(12, np.float32),    # [24:36] right hand + padding
-        ]).astype(np.float32)
+        state = np.concatenate([la, wp]).astype(np.float32)    # (14,)
+        action = np.concatenate([lh, [lg], wp]).astype(np.float32)  # (14,)
 
         states.append(state)
         actions.append(action)
@@ -205,15 +167,28 @@ def process_one(ep_dir: str) -> tuple:
     if not states:
         raise RuntimeError(f"No frames extracted from {ep_dir}")
 
-    state_arr = np.stack(states)   # (T, 32)
-    action_arr = np.stack(actions) # (T, 36)
-    T = len(states)
+    chunk_size = 10
+    if len(states) < chunk_size:
+        raise RuntimeError(
+            f"Episode too short for chunk_size={chunk_size}: {len(states)} frames in {ep_dir}"
+        )
+
+    action_chunks = []
+    state_at_chunk = []
+    for t in range(len(actions) - chunk_size + 1):
+        chunk = np.stack(actions[t : t + chunk_size])  # (chunk_size, 14)
+        action_chunks.append(chunk.flatten())           # (140,)
+        state_at_chunk.append(states[t])                # (14,)
+
+    state_arr = np.stack(state_at_chunk)    # (T', 14)
+    action_arr = np.stack(action_chunks)    # (T', 140)
+    T = len(state_at_chunk)
     is_first = np.zeros(T, dtype=bool)
     is_first[0] = True
     is_last = np.zeros(T, dtype=bool)
     is_last[-1] = True
 
-    # Decode video frames
+    # Decode video frames — only need frames at chunk-start positions
     mp4_path = os.path.join(ep_dir, f"{ep_name}_head_cam.mp4")
     if not os.path.exists(mp4_path):
         mp4_path = os.path.join(ep_dir, f"{ep_name}_cam_head.mp4")
@@ -231,11 +206,11 @@ def process_one(ep_dir: str) -> tuple:
         cropped = frame[y0:y0 + crop, x0:x0 + crop]
         return tf.image.resize(cropped, [size, size]).numpy().astype(np.uint8)
 
-    all_frames = iio.imread(mp4_path, plugin="pyav")  # (N, H, W, 3)
+    all_frames = iio.imread(mp4_path, plugin="pyav")
     fi_sub_indices = [int(x[1].frame_number) for x in fi_sub]
 
     jpeg_frames = []
-    for fi in fi_sub_indices:
+    for fi in fi_sub_indices[:T]:   # only chunk-start positions
         frame = all_frames[fi] if fi < len(all_frames) else all_frames[-1]
         frame = _center_crop_resize(frame)
         jpeg = tf.image.encode_jpeg(frame, quality=95).numpy()

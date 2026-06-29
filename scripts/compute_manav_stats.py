@@ -58,27 +58,22 @@ def main():
     print(f"Computing stats from {len(ep_dirs)} episodes in {split_dir} ...")
 
     # Running accumulators for each leaf
-    # Structure matches manav_dataset_transform output:
-    #   state.JOINT_POS  [18]
-    #   state.MISC       [14]
-    #   action.desired_absolute.JOINT_POS  [16]
-    #   action.desired_absolute.GRIPPER    [2]
-    #   action.desired_absolute.MISC       [18]
+    # Structure matches manav_chunked_transform output (chunk_size=10):
+    #   state.JOINT_POS  [7]    left arm joints (at chunk-start frame)
+    #   state.MISC       [7]    left wrist pose (at chunk-start frame)
+    #   action.desired_absolute.JOINT_POS  [60]  6 hand joints × 10 steps
+    #   action.desired_absolute.GRIPPER    [10]  1 gripper     × 10 steps
+    #   action.desired_absolute.MISC       [70]  7 wrist dims  × 10 steps
 
-    keys = {
-        ("state", "JOINT_POS"):                       (slice(0, 18), "state"),
-        ("state", "MISC"):                             (slice(18, 32), "state"),
-        ("action", "desired_absolute", "JOINT_POS"):   (slice(0, 16), "action"),
-        ("action", "desired_absolute", "GRIPPER"):     (slice(16, 18), "action"),
-        ("action", "desired_absolute", "MISC"):        (slice(18, 36), "action"),
-    }
+    CHUNK_SIZE = 10
+    ACTION_DIM = 14
 
     dim_map = {
-        ("state", "JOINT_POS"): 18,
-        ("state", "MISC"): 14,
-        ("action", "desired_absolute", "JOINT_POS"): 16,
-        ("action", "desired_absolute", "GRIPPER"): 2,
-        ("action", "desired_absolute", "MISC"): 18,
+        ("state", "JOINT_POS"):                       7,
+        ("state", "MISC"):                             7,
+        ("action", "desired_absolute", "JOINT_POS"):  CHUNK_SIZE * 6,
+        ("action", "desired_absolute", "GRIPPER"):    CHUNK_SIZE * 1,
+        ("action", "desired_absolute", "MISC"):       CHUNK_SIZE * 7,
     }
 
     # Welford-style running stats
@@ -95,22 +90,24 @@ def main():
         ep_name = os.path.basename(ep_dir)
         npz_path = os.path.join(ep_dir, ep_name + "_cached.npz")
         data = np.load(npz_path, allow_pickle=True)
-        state_arr  = data["state"].astype(np.float64)   # (T, 32)
-        action_arr = data["action"].astype(np.float64)  # (T, 36)
+        state_arr  = data["state"].astype(np.float64)   # (T', 14)
+        action_arr = data["action"].astype(np.float64)  # (T', 140)
 
         # Map to transform structure (exclude last step like the original)
         T = state_arr.shape[0]
         if T < 2:
             continue
-        s = state_arr[:-1]   # (T-1, 32)
-        a = action_arr[:-1]  # (T-1, 36)
+        s = state_arr[:-1]   # (T'-1, 14)
+        a = action_arr[:-1]  # (T'-1, 140)
 
+        # Reshape chunked action back to (T, chunk_size, action_dim) for component extraction
+        a_r = a.reshape(-1, CHUNK_SIZE, ACTION_DIM)  # (T'-1, 10, 14)
         leaf_data = {
-            ("state", "JOINT_POS"):                      s[:, :18],
-            ("state", "MISC"):                           s[:, 18:32],
-            ("action", "desired_absolute", "JOINT_POS"): a[:, :16],
-            ("action", "desired_absolute", "GRIPPER"):   a[:, 16:18],
-            ("action", "desired_absolute", "MISC"):      a[:, 18:36],
+            ("state", "JOINT_POS"):                      s[:, :7],
+            ("state", "MISC"):                           s[:, 7:14],
+            ("action", "desired_absolute", "JOINT_POS"): a_r[:, :, :6].reshape(-1, CHUNK_SIZE * 6),
+            ("action", "desired_absolute", "GRIPPER"):   a_r[:, :, 6:7].reshape(-1, CHUNK_SIZE * 1),
+            ("action", "desired_absolute", "MISC"):      a_r[:, :, 7:].reshape(-1, CHUNK_SIZE * 7),
         }
 
         for k, arr in leaf_data.items():

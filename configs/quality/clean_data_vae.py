@@ -1,61 +1,73 @@
 """
-BetaVAE trained on Robometer-filtered clean_data episodes (Franka MCAP format).
+BetaVAE trained on Robometer-filtered clean_data episodes (Manav dual-arm, chunked actions).
 
-Data layout expected at configs/paths.yaml::deminf_data_dir:
-    train/episode_XXXX/{episode_XXXX.mcap, cam_head.mp4}
-    test/episode_XXXX/{episode_XXXX.mcap, cam_head.mp4}
+State (14 dims): left arm joints [0:7] + left wrist pose [7:14]
+Action (140 dims): 10-step action chunks, time-first flattened
+    JOINT_POS: 10 × 6  = 60   left hand joint commands per step
+    GRIPPER:   10 × 1  = 10   left gripper per step
+    MISC:      10 × 7  = 70   left wrist target pose per step
+
+Two separate VAEs are trained — one for obs state, one for action chunks — so that
+kSG mutual information estimation gets genuinely different latent spaces (z_obs ≠ z_action).
 
 Usage (from /data/demonstration-information):
     /data/.conda/envs/openx/bin/python3 scripts/train.py \\
-        --config /data/reward_model/configs/quality/clean_data_vae.py:sa \\
-        --path /tmp/rdf_deminf_ckpts \\
-        --name clean_data_vae
+        --config /data/reward_model/configs/quality/clean_data_vae.py:obs \\
+        --path /tmp/rdf_deminf_ckpts --name obs_vae --include_timestamp=False
 
 config_str options:
-    s   — obs state VAE only  (z_dim=12)
-    a   — action VAE only     (z_dim=6)
-    sa  — joint state+action  (z_dim=18)
+    obs    — observation state VAE only  (z_dim=7)
+    action — action chunk VAE only       (z_dim=14)
+    sa     — joint state+action (backward compat, z_dim=14)
 """
 
-import os
+import os  # noqa: I001
+import sys
+from pathlib import Path
+
+# Make rdf.data importable when this config is loaded by train.py
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 import optax
 import tensorflow as tf
 from ml_collections import ConfigDict
-
 from openx.algs.beta_vae import BetaVAE
-from openx.data.datasets.manav import manav_dataset_transform
 from openx.data.utils import NormalizationType, StateEncoding
 from openx.networks.components.mlp import MLP
 from openx.networks.core import Concatenate, MultiDecoder, MultiEncoder
 from openx.utils.spec import ModuleSpec
 
-DEMINF_DATA = os.environ.get("RDF_DEMINF_DATA", "/data/reward_model_files/rdf_pipeline_deminf/deminf_data")
+from rdf.data.manav_chunked_transform import manav_chunked_transform
+
+DEMINF_DATA = os.environ.get(
+    "RDF_DEMINF_DATA",
+    "/data/reward_model_files/rdf_pipeline_deminf/deminf_data",
+)
 
 
-def get_config(config_str: str = "sa"):
-    config_type = config_str
-    assert config_type in {"s", "a", "sa"}, f"Unknown config_str {config_str!r}"
+def get_config(config_str: str = "obs"):
+    assert config_str in {"obs", "action", "sa"}, f"Unknown config_str {config_str!r}"
 
     vae_keys = {
-        "s":  {"observation->state": None},
-        "a":  {"action": None},
-        "sa": {"observation->state": None, "action": None},
-    }[config_type]
-    z_dim = {"s": 12, "a": 6, "sa": 18}[config_type]
+        "obs":    {"observation->state": None},
+        "action": {"action": None},
+        "sa":     {"observation->state": None, "action": None},
+    }[config_str]
+    z_dim = {"obs": 7, "action": 14, "sa": 14}[config_str]
 
+    # Full structure needed for normalization of all keys, even when only a subset is encoded.
     structure = {
         "observation": {
             "state": {
-                StateEncoding.JOINT_POS: NormalizationType.GAUSSIAN,
-                StateEncoding.MISC:      NormalizationType.GAUSSIAN,
+                StateEncoding.JOINT_POS: NormalizationType.GAUSSIAN,  # [7]
+                StateEncoding.MISC:      NormalizationType.GAUSSIAN,  # [7]
             },
         },
         "action": {
             "desired_absolute": {
-                StateEncoding.JOINT_POS: NormalizationType.GAUSSIAN,
-                StateEncoding.GRIPPER:   NormalizationType.BOUNDS,
-                StateEncoding.MISC:      NormalizationType.GAUSSIAN,
+                StateEncoding.JOINT_POS: NormalizationType.GAUSSIAN,  # [60] = 10 × 6
+                StateEncoding.GRIPPER:   NormalizationType.BOUNDS,    # [10] = 10 × 1
+                StateEncoding.MISC:      NormalizationType.GAUSSIAN,  # [70] = 10 × 7
             },
         },
     }
@@ -64,16 +76,16 @@ def get_config(config_str: str = "sa"):
         datasets={
             "clean_data": dict(
                 path=DEMINF_DATA,
-                train_split="train",
-                val_split="test",
-                transform=ModuleSpec.create(manav_dataset_transform),
+                train_split="train_sel",
+                val_split="test_sel",
+                transform=ModuleSpec.create(manav_chunked_transform),
             ),
         },
         n_obs=1,
         n_action=1,
         shuffle_size=2000,
         batch_size=32,
-        recompute_statistics=True,
+        recompute_statistics=False,
         cache=True,
         prefetch=tf.data.AUTOTUNE,
     )
