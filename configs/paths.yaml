@@ -6,7 +6,7 @@
 
 # Raw episodes directory — subdirs named by episode_id, each containing
 # {episode_id}_head_cam.mp4, {episode_id}_0.mcap, metadata.yaml
-clean_data_dir: /data/task_2_data_real
+clean_data_dir: /data/real_world_data_filtered
 
 # ── Pipeline scratch / outputs ────────────────────────────────────────────────
 

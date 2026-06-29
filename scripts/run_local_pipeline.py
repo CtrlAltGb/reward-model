@@ -414,7 +414,24 @@ class CleanDataStore(ObjectStore):
 
 
 def _parse_metadata(episode_id: str) -> dict:
-    meta_path = CLEAN_DATA / episode_id / "metadata.yaml"
+    import json as _json
+    ep_dir = CLEAN_DATA / episode_id
+
+    # New raybot layout: metadata.json contains device/session info.
+    # metadata.yaml in this layout is the ROS2 bag manifest (not task metadata).
+    json_path = ep_dir / "metadata.json"
+    if json_path.exists():
+        meta = _json.loads(json_path.read_text())
+        return {
+            "task": meta.get("task_code") or "unknown",
+            "task_id": _pipeline.default_task_id,
+            "instruction": _pipeline.default_instruction,
+            "embodiment": meta.get("robot_variant", meta.get("hw_setup", "manav_raybot")),
+            "robot_id": meta.get("device_id", "unknown"),
+        }
+
+    # Old layout: metadata.yaml contains task fields.
+    meta_path = ep_dir / "metadata.yaml"
     meta = yaml.safe_load(meta_path.read_text())
     tasks = meta.get("tasks", [])
     task = tasks[0] if tasks else meta.get("task", meta.get("session_name", "unknown"))
@@ -442,8 +459,11 @@ def build_manifests(instruction_override: str | None = None) -> list[EpisodeMani
     for ep_dir in sorted(CLEAN_DATA.iterdir()):
         if not ep_dir.is_dir():
             continue
-        # Skip the failed/ subdirectory and any non-episode files/dirs
-        if ep_dir.name in ("failed",) or not (ep_dir / "metadata.yaml").exists():
+        # Skip the failed/ subdirectory and any non-episode dirs
+        if ep_dir.name in ("failed",):
+            continue
+        # Accept dirs with either metadata.json (new raybot layout) or metadata.yaml (old layout)
+        if not (ep_dir / "metadata.json").exists() and not (ep_dir / "metadata.yaml").exists():
             continue
         episode_id = ep_dir.name
         fields = _parse_metadata(episode_id)

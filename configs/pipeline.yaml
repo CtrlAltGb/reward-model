@@ -44,7 +44,7 @@ default_task_id: "003"
 # Should describe what a successful episode looks like so the VLM can score it.
 # Priority: RDF_INSTRUCTION env var > metadata.yaml instruction field > this value.
 # Example: "Pick up the red block and place it in the bin."
-default_instruction: "Pick up the red block and place it in the green slab"
+default_instruction: "Pick up the red block and place it in the tray"
 
 # ── Pipeline mode ─────────────────────────────────────────────────────────────
 
