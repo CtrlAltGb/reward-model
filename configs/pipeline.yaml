@@ -4,7 +4,7 @@
 # ── Decision thresholds ───────────────────────────────────────────────────────
 
 # Stage A gate: episodes with robometer_success_pred < this are dropped
-robometer_threshold: 0.5
+robometer_threshold: 0.8
 
 # Stage B trim: episodes with deminf_score < this are dropped.
 # Ignored when deminf_filter_bottom_pct > 0.
@@ -31,7 +31,7 @@ embodiment: raybot
 
 # Fallback task_id used when metadata.yaml has no task_id field.
 # DemInf episode data is organised under deminf_data_dir/{task_id}/train/.
-default_task_id: "001"
+default_task_id: "003"
 
 # ── Default Robometer instruction ─────────────────────────────────────────────
 

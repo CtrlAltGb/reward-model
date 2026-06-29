@@ -79,14 +79,19 @@ def _setup_deminf_data(manifests: list) -> int:
                 if src.exists():
                     (ep_dst / fname).symlink_to(src)
         else:
-            # New Manav layout: {ep}_head_cam.mp4, {ep}_0.mcap
-            # Create {ep}.mcap alias so _mcap_split_dirs finds the dir
-            if new_mcap.exists():
-                (ep_dst / f"{m.episode_id}.mcap").symlink_to(new_mcap)
-            for suffix in [f"{m.episode_id}_head_cam.mp4", f"{m.episode_id}_0.mcap", "metadata.yaml"]:
-                src = ep_src / suffix
-                if src.exists():
-                    (ep_dst / suffix).symlink_to(src)
+            # New Manav layout: files may be named by session_name, not episode_id
+            # Resolve actual MCAP and MP4 via glob when standard names don't exist
+            actual_mcap = new_mcap if new_mcap.exists() else next(iter(ep_src.glob("*_0.mcap")), None)
+            actual_mp4 = (ep_src / f"{m.episode_id}_head_cam.mp4") if (ep_src / f"{m.episode_id}_head_cam.mp4").exists() else next(iter(ep_src.glob("*_head_cam.mp4")), None)
+            if actual_mcap:
+                # Canonical alias so _mcap_split_dirs can find the dir
+                (ep_dst / f"{m.episode_id}.mcap").symlink_to(actual_mcap)
+                (ep_dst / actual_mcap.name).symlink_to(actual_mcap)
+            if actual_mp4:
+                (ep_dst / actual_mp4.name).symlink_to(actual_mp4)
+            meta_src = ep_src / "metadata.yaml"
+            if meta_src.exists():
+                (ep_dst / "metadata.yaml").symlink_to(meta_src)
 
         added += 1
     return added
@@ -352,11 +357,15 @@ class CleanDataStore(ObjectStore):
         filename = parts[2]
         ep_dir = CLEAN_DATA / episode_id
         if filename == "head.mp4":
-            # Try old Franka layout first, then new Manav layout
-            old = ep_dir / "cam_head.mp4"
-            if old.exists():
-                return old
-            return ep_dir / f"{episode_id}_head_cam.mp4"
+            # Try old Franka layout, then same-name Manav, then glob (session_name ≠ episode_id)
+            for candidate in [
+                ep_dir / "cam_head.mp4",
+                ep_dir / f"{episode_id}_head_cam.mp4",
+            ]:
+                if candidate.exists():
+                    return candidate
+            matches = list(ep_dir.glob("*_head_cam.mp4"))
+            return matches[0] if matches else None
         if filename == "data.mcap":
             old = ep_dir / f"{episode_id}.mcap"
             if old.exists():
@@ -409,10 +418,10 @@ def _parse_metadata(episode_id: str) -> dict:
     meta = yaml.safe_load(meta_path.read_text())
     tasks = meta.get("tasks", [])
     task = tasks[0] if tasks else meta.get("task", meta.get("session_name", "unknown"))
-    task_id = meta.get("task_id")
+    task_id = meta.get("task_id") or meta.get("id")
     if task_id is None:
         print(
-            f"  WARNING: {episode_id}/metadata.yaml has no task_id field"
+            f"  WARNING: {episode_id}/metadata.yaml has no task_id or id field"
             f" — using default_task_id={_pipeline.default_task_id!r}",
             flush=True,
         )

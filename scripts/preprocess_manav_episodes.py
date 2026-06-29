@@ -73,6 +73,11 @@ def process_one(ep_dir: str) -> tuple:
     if not os.path.exists(mcap_path):
         mcap_path = os.path.join(ep_dir, ep_name + ".mcap")
     if not os.path.exists(mcap_path):
+        # session_name differs from episode_id (e.g. task_2_data_real layout)
+        import glob as _glob
+        matches = _glob.glob(os.path.join(ep_dir, "*_0.mcap"))
+        mcap_path = matches[0] if matches else ""
+    if not mcap_path or not os.path.exists(mcap_path):
         raise FileNotFoundError(f"No MCAP found in {ep_dir}")
 
     from mcap_ros2.reader import read_ros2_messages
@@ -193,6 +198,11 @@ def process_one(ep_dir: str) -> tuple:
     if not os.path.exists(mp4_path):
         mp4_path = os.path.join(ep_dir, f"{ep_name}_cam_head.mp4")
     if not os.path.exists(mp4_path):
+        # session_name differs from episode_id (e.g. task_2_data_real layout)
+        import glob as _glob
+        matches = _glob.glob(os.path.join(ep_dir, "*_head_cam.mp4"))
+        mp4_path = matches[0] if matches else ""
+    if not mp4_path or not os.path.exists(mp4_path):
         raise FileNotFoundError(f"No head camera MP4 in {ep_dir}")
 
     import imageio.v3 as iio
@@ -248,23 +258,28 @@ def main():
     total = len(ep_dirs)
     print(f"Processing {total} Manav episodes with {args.workers} workers…\n")
 
-    done = skipped = 0
+    done = skipped = failed = 0
     t0 = time.time()
 
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futures = {ex.submit(process_one, d): d for d in ep_dirs}
         for fut in as_completed(futures):
-            ep_dir, elapsed, was_cached = fut.result()
+            ep_dir = futures[fut]
             ep_name = os.path.basename(ep_dir)
             done += 1
-            tag = "cached" if was_cached else f"{elapsed:.1f}s"
-            if was_cached:
-                skipped += 1
+            try:
+                ep_dir, elapsed, was_cached = fut.result()
+                tag = "cached" if was_cached else f"{elapsed:.1f}s"
+                if was_cached:
+                    skipped += 1
+            except Exception as exc:
+                failed += 1
+                tag = f"SKIP: {exc}"
             pct = done / total * 100
             print(f"  [{done:3d}/{total}  {pct:5.1f}%]  {ep_name}  ({tag})", flush=True)
 
-    new = done - skipped
-    print(f"\nDone. {new} newly cached, {skipped} already cached. "
+    new = done - skipped - failed
+    print(f"\nDone. {new} newly cached, {skipped} already cached, {failed} skipped (errors). "
           f"Total: {time.time() - t0:.0f}s")
 
 
