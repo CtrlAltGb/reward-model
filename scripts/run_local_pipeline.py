@@ -549,6 +549,7 @@ def main():
         store=store,
         catalog=catalog,
         robometer_threshold=robometer_threshold,
+        progress_dip_tolerance=_pipeline.robometer_progress_dip_tolerance,
         poll_wait=0,
         max_episodes=max_a,
         decoded_stream=decoded_q,

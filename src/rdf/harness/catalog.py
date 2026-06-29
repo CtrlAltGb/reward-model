@@ -24,7 +24,13 @@ class Catalog(ABC):
     def get_row(self, episode_id: str) -> CatalogRow | None: ...
 
     @abstractmethod
-    def update_robometer(self, result: RobometerResult, pass_: bool, threshold: float) -> None: ...
+    def update_robometer(
+        self,
+        result: RobometerResult,
+        pass_: bool,
+        threshold: float,
+        progress_dip: bool = False,
+    ) -> None: ...
 
     @abstractmethod
     def update_deminf(self, result: DeminfResult, pass_: bool, threshold: float) -> None: ...
@@ -90,7 +96,13 @@ class LocalCatalog(Catalog):
         new_row = CatalogRow.model_validate(data)
         self.upsert_row(new_row)
 
-    def update_robometer(self, result: RobometerResult, pass_: bool, threshold: float) -> None:
+    def update_robometer(
+        self,
+        result: RobometerResult,
+        pass_: bool,
+        threshold: float,
+        progress_dip: bool = False,
+    ) -> None:
         self._update_row(
             result.episode_id,
             {
@@ -98,6 +110,7 @@ class LocalCatalog(Catalog):
                 "robometer_success_pred": result.robometer_success_pred,
                 "robometer_pass": pass_,
                 "robometer_model_version": result.model_version,
+                "robometer_progress_dip": progress_dip,
             },
         )
 
@@ -141,19 +154,27 @@ class AwsCatalog(Catalog):
         item = resp.get("Item")
         return CatalogRow.model_validate(item) if item else None
 
-    def update_robometer(self, result: RobometerResult, pass_: bool, threshold: float) -> None:
+    def update_robometer(
+        self,
+        result: RobometerResult,
+        pass_: bool,
+        threshold: float,
+        progress_dip: bool = False,
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self.table.update_item(
             Key={"episode_id": result.episode_id},
             UpdateExpression=(
                 "SET robometer_reward=:rr, robometer_success_pred=:rs, "
-                "robometer_pass=:rp, robometer_model_version=:mv, updated_at=:ua"
+                "robometer_pass=:rp, robometer_model_version=:mv, "
+                "robometer_progress_dip=:pd, updated_at=:ua"
             ),
             ExpressionAttributeValues={
                 ":rr": str(result.robometer_reward),
                 ":rs": str(result.robometer_success_pred),
                 ":rp": pass_,
                 ":mv": result.model_version,
+                ":pd": progress_dip,
                 ":ua": now,
             },
         )

@@ -39,6 +39,15 @@ from rdf.schemas.models import EpisodeManifest, RobometerResult
 logger = get_logger(__name__)
 
 
+def _check_dip(arr: "np.ndarray", tolerance: float) -> bool:
+    """Return True if any consecutive drop in arr exceeds tolerance."""
+    import numpy as _np
+    if arr is None or len(arr) < 2:
+        return False
+    drops = arr[:-1] - arr[1:]
+    return bool(_np.any(drops > tolerance))
+
+
 def _get_model() -> RobometerModel:
     from rdf.models.robometer_worker import RobometerLocalWorker
     return RobometerLocalWorker()
@@ -193,6 +202,7 @@ def _score_one(
     frames,
     preprocess_error: str | None,
     robometer_threshold: float,
+    progress_dip_tolerance: float = 1.0,
 ) -> None:
     """Score one episode and write the result to the catalog. Always deletes the queue message."""
     clear_context()
@@ -236,12 +246,21 @@ def _score_one(
             scored_at=now,
             status="scored",
         )
-        passed = score.success_pred >= robometer_threshold
-        catalog.update_robometer(result, pass_=passed, threshold=robometer_threshold)
+        success_pass = score.success_pred >= robometer_threshold
+        progress_dip = _check_dip(score.progress_array, progress_dip_tolerance)
+        passed = success_pass and not progress_dip
+        catalog.update_robometer(
+            result,
+            pass_=passed,
+            threshold=robometer_threshold,
+            progress_dip=progress_dip,
+        )
         logger.info(
             "Scored episode",
             reward=score.reward,
             success_pred=score.success_pred,
+            success_pass=success_pass,
+            progress_dip=progress_dip,
             passed=passed,
             latency_ms=round(latency_ms, 1),
         )
@@ -272,6 +291,7 @@ def run_worker(
     store: ObjectStore | None = None,
     catalog: Catalog | None = None,
     robometer_threshold: float = 0.5,
+    progress_dip_tolerance: float = 1.0,
     poll_wait: int = 5,
     max_episodes: int | None = None,
     n_preprocess_workers: int = 8,
@@ -337,6 +357,7 @@ def run_worker(
                 frames=frames,
                 preprocess_error=preprocess_error,
                 robometer_threshold=robometer_threshold,
+                progress_dip_tolerance=progress_dip_tolerance,
             )
             processed += 1
 
@@ -376,6 +397,7 @@ def run_worker(
             frames=frames,
             preprocess_error=preprocess_error,
             robometer_threshold=robometer_threshold,
+            progress_dip_tolerance=progress_dip_tolerance,
         )
         processed += 1
 

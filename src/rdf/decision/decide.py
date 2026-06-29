@@ -35,8 +35,12 @@ def decide_episode(
 
     if row.robometer_success_pred < robometer_threshold:
         reasons.append("task_incomplete")
+    if row.robometer_progress_dip:
+        reasons.append("progress_dip")
+
+    if reasons:
         catalog.finalize(episode_id, "drop", reasons)
-        logger.info("Decision: drop (task_incomplete)", episode_id=episode_id)
+        logger.info("Decision: drop", episode_id=episode_id, reasons=reasons)
         return "drop"
 
     # Stage B trim

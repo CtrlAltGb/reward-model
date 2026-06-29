@@ -74,6 +74,7 @@ class CatalogRow(BaseModel):
     robometer_reward: float | None = None
     robometer_success_pred: float | None = None
     robometer_pass: bool | None = None
+    robometer_progress_dip: bool | None = None
     deminf_score: float | None = None
     deminf_pass: bool | None = None
     final_decision: Literal["keep", "drop", "pending"] = "pending"
@@ -125,6 +126,10 @@ class PipelineConfig(BaseModel):
     # Decision thresholds
     robometer_threshold: float = 0.5
     deminf_threshold: float = -10.0
+    # Monotonicity dip tolerance — max allowed per-frame decrease in progress.
+    # E.g. 0.05 allows a drop of up to 5% between consecutive frames.
+    # Set to 1.0 to disable the dip check entirely.
+    robometer_progress_dip_tolerance: float = 0.05
     # If > 0, override deminf_threshold with the Nth percentile of scored episodes
     # (e.g. 0.20 drops the bottom 20%). Set to 0.0 to use fixed deminf_threshold.
     deminf_filter_bottom_pct: float = 0.0

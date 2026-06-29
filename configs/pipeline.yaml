@@ -6,6 +6,11 @@
 # Stage A gate: episodes with robometer_success_pred < this are dropped
 robometer_threshold: 0.8
 
+# Monotonicity dip check — max allowed per-frame decrease in progress / success_pred.
+# E.g. 0.05 flags any episode where a frame drops more than 5% below the previous frame.
+# Set to 1.0 to disable the check (no episode can dip by more than 100%).
+robometer_progress_dip_tolerance: 0.8
+
 # Stage B trim: episodes with deminf_score < this are dropped.
 # Ignored when deminf_filter_bottom_pct > 0.
 deminf_threshold: -1.0
