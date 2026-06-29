@@ -165,9 +165,7 @@ class RobometerLocalWorker:
             getattr(loss_config, "progress_discrete_bins", None)
             or getattr(exp_config.model, "progress_discrete_bins", 10)
         )
-        # Model was trained on max_frames frames — subsample to this count at inference
-        # to match training distribution and avoid 3-5× token overhead from longer videos.
-        self._max_frames: int = getattr(exp_config.data, "max_frames", 8) or 8
+        self._max_frames: int = 30
 
     def score_episode_from_frames(self, frames: np.ndarray, instruction: str) -> RobometerScore:
         import torch
@@ -209,20 +207,12 @@ class RobometerLocalWorker:
             np.array(progress_pred[0], dtype=np.float32)
             if progress_pred else np.array([], dtype=np.float32)
         )
-        outputs_success = results.get("outputs_success", {}) or {}
-        success_probs = outputs_success.get("success_probs", [])
-        success_array = (
-            np.array(success_probs[0], dtype=np.float32)
-            if success_probs else np.array([], dtype=np.float32)
-        )
-
         reward = float(np.mean(progress_array)) if progress_array.size else 0.0
-        success_pred = float(success_array[-1]) if success_array.size else (
-            float(progress_array[-1]) if progress_array.size else 0.0
-        )
+        success_pred = float(progress_array[-1]) if progress_array.size else 0.0
         return RobometerScore(
             reward=round(reward, 6),
             success_pred=round(success_pred, 6),
             frames_used=T,
             model_version=self.model_version,
+            progress_array=progress_array,
         )

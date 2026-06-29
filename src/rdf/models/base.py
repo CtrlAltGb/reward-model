@@ -14,6 +14,12 @@ class RobometerScore:
     success_pred: float
     frames_used: int
     model_version: str
+    # Per-frame progress predictions for monotonicity check (empty if unavailable)
+    progress_array: np.ndarray = None
+
+    def __post_init__(self):
+        if self.progress_array is None:
+            self.progress_array = np.array([], dtype=np.float32)
 
 
 class RobometerModel(Protocol):
