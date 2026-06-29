@@ -11,7 +11,10 @@ robometer_threshold: 0.5
 deminf_threshold: -1.0
 
 # Drop the bottom N% of episodes by DemInf score (percentile-based filter).
-# Set to 0.0 to use the fixed deminf_threshold above instead.
+# After scoring, the Nth percentile of all scored episodes becomes the threshold —
+# so exactly this fraction is always dropped regardless of absolute score range.
+# Typical range: 0.10 (drop worst 10%) to 0.30 (drop worst 30%).
+# Set to 0.0 to disable and use the fixed deminf_threshold above instead.
 deminf_filter_bottom_pct: 0.20
 
 # ── Versioning ────────────────────────────────────────────────────────────────
@@ -22,13 +25,21 @@ reference_set_version: v1
 # ── Embodiment ────────────────────────────────────────────────────────────────
 
 # Default embodiment used by Stage B to look up MCAP topic names
-embodiment: franka
+embodiment: raybot
 
 # ── Task ID ───────────────────────────────────────────────────────────────────
 
 # Fallback task_id used when metadata.yaml has no task_id field.
 # DemInf episode data is organised under deminf_data_dir/{task_id}/train/.
 default_task_id: "001"
+
+# ── Default Robometer instruction ─────────────────────────────────────────────
+
+# Task description passed to Robometer when metadata.yaml has no instruction field.
+# Should describe what a successful episode looks like so the VLM can score it.
+# Priority: RDF_INSTRUCTION env var > metadata.yaml instruction field > this value.
+# Example: "Pick up the red block and place it in the bin."
+default_instruction: "Pick up the red block and place it in the green slab"
 
 # ── Pipeline mode ─────────────────────────────────────────────────────────────
 

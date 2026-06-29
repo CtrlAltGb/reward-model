@@ -422,7 +422,7 @@ def _parse_metadata(episode_id: str) -> dict:
     return {
         "task": task,
         "task_id": task_id,
-        "instruction": meta.get("instruction", task),
+        "instruction": meta.get("instruction") or _pipeline.default_instruction or task,
         "embodiment": meta.get("robot_type", meta.get("embodiment", "manav_dual_arm")),
         "robot_id": meta.get("robot_id", "unknown"),
     }

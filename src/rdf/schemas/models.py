@@ -135,6 +135,9 @@ class PipelineConfig(BaseModel):
     embodiment: str = "franka"
     # Fallback task_id when metadata.yaml has no task_id field
     default_task_id: str = "001"
+    # Default task instruction passed to Robometer when metadata.yaml has no instruction field.
+    # Describes what a successful episode looks like so the VLM can score it correctly.
+    default_instruction: str = ""
 
 
 class PathsConfig(BaseModel):
